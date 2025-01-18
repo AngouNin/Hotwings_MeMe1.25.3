@@ -15,6 +15,44 @@ pub const MAX_MILESTONES: usize = 8; // Example max number of milestones
 pub mod hotwings_token {
     use super::*;
 
+    /// Registers multiple users into the program by storing the CSV-parsed data on-chain.
+    pub fn register_users(ctx: Context<RegisterUsers>, entries: Vec<UserEntry>) -> Result<()> {
+        let global_state = &mut ctx.accounts.global_state;
+
+        for entry in entries.iter() {
+            // Derive the PDA for the user
+            let (user_state_pda, _bump) = Pubkey::find_program_address(
+                &[b"user_state", entry.wallet.as_ref()],
+                ctx.program_id,
+            );
+
+            // Check if the user's PDA already exists (avoids duplicates)
+            let existing_account = ctx
+                .remaining_accounts
+                .iter()
+                .find(|account| account.key == &user_state_pda);
+            if existing_account.is_some() {
+                return Err(ProgramError::Custom(1).into()); // "User already registered"
+            }
+
+            // Initialize the user's PDA account
+            let mut user_state = Account::<MilestoneUnlockAccount>::try_from_unchecked(
+                &ctx.accounts.user_state,
+            )?;
+            user_state.wallet = entry.wallet; // User's associated token account public key
+            user_state.total_locked_tokens = entry.locked_tokens; // Total locked tokens from CSV
+            user_state.unlocked_tokens = 0; // Initially, no tokens unlocked
+            user_state.last_unlocked_milestone = 0;
+
+            // Increment user count
+            global_state.user_count += 1;
+
+            msg!("Registered user: {:?}", entry.wallet);
+        }
+
+        Ok(())
+    }
+
     pub fn initialize_program(ctx: Context<InitializeProgram>) -> Result<()> {
         let global_state = &mut ctx.accounts.global_state;
     
@@ -89,8 +127,9 @@ pub mod hotwings_token {
             // Iterate over all user states (by fetching PDAs programmatically)
             // This assumes PDAs are generated using `[b"user_state", wallet_address]`
             for i in 0..global_state.user_count {
-                let seed = [b"user_state", &i.to_le_bytes()];
-                if let Some(user_state) = get_user_state(&ctx.accounts, seed)? {
+                let seed = [b"user_state".as_ref(), &i.to_le_bytes()].concat(); // Combine `b"user_state"` and bytes of `i`
+                // Pass a reference to `ctx` and convert `seed` to a slice using `.as_slice()`
+                if let Some(user_state) = get_user_state(&ctx, seed.as_slice())? { // Pass the seed as a slice
                     // Calculate total unlockable tokens
                     let total_unlockable = user_state
                         .total_locked_tokens
@@ -123,6 +162,7 @@ pub mod hotwings_token {
                         // Update user's unlocked tokens
                         user_state.unlocked_tokens += new_unlock;
                     }
+                    msg!("User PDA: {:?}", user_state.wallet);
                 }
             }
     
@@ -156,9 +196,34 @@ pub mod hotwings_token {
 
 
 // Helper function to fetch a user state from PDA
-fn get_user_state(ctx: &Context<UnlockTokens>, seed: &[u8]) -> Option<Account<MilestoneUnlockAccount>> {
-    let user_pda = Pubkey::find_program_address(seed, ctx.program_id);
-    Account::try_from(&ctx.remaining_accounts.iter().find(|acc| acc.key == user_pda).unwrap()).ok()
+fn get_user_state(
+    ctx: &Context<UnlockTokens>, 
+    seed: &[u8] // Accepts a reference to a slice of bytes
+) -> Option<Account<MilestoneUnlockAccount>> {
+    // Derive the PDA
+    let (user_pda, _bump) = Pubkey::find_program_address(seed, ctx.program_id);
+    
+    // Find the user state in the remaining accounts
+    ctx.remaining_accounts
+        .iter()
+        .find(|acc| acc.key == user_pda)
+        .and_then(|account_info| Account::try_from(account_info).ok())
+}
+
+#[derive(AnchorSerialize, AnchorDeserialize, Clone)]
+pub struct UserEntry {
+    pub wallet: Pubkey, // User's wallet public key
+    pub locked_tokens: u64, // Locked token amount
+}
+
+#[derive(Accounts)]
+pub struct RegisterUsers<'info> {
+    #[account(mut)]
+    pub global_state: Account<'info, GlobalState>, // Global state containing milestone data
+    #[account(mut)]
+    pub authority: Signer<'info>, // Authority signing the transaction
+    /// CHECK: Writing PDAs dynamically, so we use remaining accounts for user PDAs
+    pub system_program: Program<'info, System>, // System program for account initialization
 }
 
 #[account]
