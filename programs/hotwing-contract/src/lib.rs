@@ -1,7 +1,6 @@
 use anchor_lang::prelude::*;
 use anchor_spl::token::{self, Token, TokenAccount};
-use spl_associated_token_account::{self, get_associated_token_address};
-use pyth_sdk_solana::{load_price, Price};
+use anchor_spl::associated_token::spl_associated_token_account::{self, get_associated_token_address}; 
 
 
 declare_id!("L1dCurNdHKSmpRHFKGcaNf64qzExvCMGuZbU3uun6ow");
@@ -70,7 +69,7 @@ pub mod automated_presale {
                     &ata_instruction,
                     &[
                         ctx.accounts.authority.to_account_info(),
-                        ctx.accounts.global_state.to_account_info(),
+                        global_state.to_account_info(),
                         ctx.accounts.system_program.to_account_info(),
                         ctx.accounts.rent.to_account_info(),
                         ctx.accounts.token_program.to_account_info(),
@@ -104,7 +103,8 @@ pub mod automated_presale {
     }
 
     /// Unlocks tokens automatically when milestone conditions are met
-    pub fn process_milestones(ctx: Context<UnlockTokens>, market_cap: u64) -> Result<()> {
+    pub fn process_milestones<'a, 'b, 'c, 'd, 'info>(ctx: Context<'a, 'b, 'c, 'd, UnlockTokens<'info>>, market_cap: u64) -> Result<()>
+    where 'c: 'info, 'd: 'info, 'info: 'd {
         let global_state = &mut ctx.accounts.global_state;
     
         // Update current market cap
@@ -148,7 +148,7 @@ pub mod automated_presale {
                 let total_unlockable_tokens = user_state
                     .total_locked_tokens
                     .checked_mul(milestone.unlock_percent as u64)
-                    .ok_or(ErrorCode::ArithmeticOverflow.into())? // This will now work
+                    .ok_or::<anchor_lang::error::Error>(ErrorCode::ArithmeticOverflow.into())? // This will now work
                     / 100;
     
                 let new_unlock = total_unlockable_tokens - user_state.unlocked_tokens;
