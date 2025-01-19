@@ -1,7 +1,6 @@
 use anchor_lang::prelude::*;
-use anchor_spl::token::{self, Mint, Token, TokenAccount};
-use anchor_spl::associated_token::spl_associated_token_account::{self, get_associated_token_address}; 
-use solana_program::program_pack::Pack;
+use anchor_spl::token::{ Mint, Token, TokenAccount}; 
+use spl_token::solana_program::program_pack::Pack;
 
 
 declare_id!("L1dCurNdHKSmpRHFKGcaNf64qzExvCMGuZbU3uun6ow");
@@ -16,13 +15,15 @@ pub const MAX_EXEMPTED_WALLETS: usize = 128; // Maximum exempted wallets
 /// Program module
 #[program]
 pub mod automated_presale {
+    use anchor_spl::{associated_token::{get_associated_token_address, spl_associated_token_account}, token};
+
     use super::*;
 
     /// Initialize the program with milestones and setup global state
     pub fn initialize_program(ctx: Context<InitializeProgram>) -> Result<()> {
         let global_state = &mut ctx.accounts.global_state;
 
-        global_state.token_mint = ctx.accounts.token_mint.key();
+        global_state.token_mint = ctx.accounts.token_mint.key(); 
         global_state.burn_wallet = ctx.accounts.burn_wallet.key();
         global_state.marketing_wallet = ctx.accounts.marketing_wallet.key();
         global_state.project_wallet = ctx.accounts.project_wallet.key();
@@ -73,10 +74,11 @@ pub mod automated_presale {
     
             // Create the user's associated token account if it doesn't exist
             if ctx.remaining_accounts.iter().find(|acc| acc.key == &user_ata).is_none() {
-                let ata_instruction = spl_associated_token_account::create_associated_token_account(
+                let ata_instruction = spl_associated_token_account::instruction::create_associated_token_account(
                     &ctx.accounts.authority.key(),
                     &entry.wallet,
                     &global_state.token_mint,
+                    &spl_associated_token_account::ID,
                 );
     
                 anchor_lang::solana_program::program::invoke(
@@ -306,6 +308,34 @@ pub mod automated_presale {
     
         Ok(())
     }
+
+    pub fn update_market_cap(ctx: Context<UpdateMarketCap>, market_cap: u64) -> Result<()> {
+        // Update the current market cap in the GlobalState account
+        let global_state = &mut ctx.accounts.global_state;
+    
+        // Validate authority (only the admin can update this)
+        if ctx.accounts.authority.key() != global_state.authority {
+            return Err(ErrorCode::Unauthorized.into());
+        }
+    
+        // Update the market cap
+        global_state.current_market_cap = market_cap;
+    
+        // Emit the MarketCapUpdated event
+        emit!(MarketCapUpdated {
+            authority: ctx.accounts.authority.key(),
+            market_cap,
+        });
+    
+        // Log the update
+        msg!(
+            "Market cap updated by authority: {:?} to {}",
+            ctx.accounts.authority.key(),
+            market_cap
+        );
+    
+        Ok(())
+    }
 }
 
 #[account]
@@ -313,8 +343,11 @@ pub mod automated_presale {
 pub struct GlobalState {
     pub authority: Pubkey,                        // Admin authority (32 bytes)
     pub token_mint: Pubkey,                       // Token mint address (32 bytes)
-    pub burn_wallet: Pubkey,                      // Burn wallet account (32 bytes)
-    pub marketing_wallet: Pubkey,                 // Marketing wallet account (32 bytes)
+    /// CHECK: This is a standard wallet account, and the program will verify its usage.
+    pub burn_wallet: Pubkey,           
+    /// CHECK: This is a standard wallet account, and the program will verify its usage.
+    pub marketing_wallet: Pubkey,     
+    /// CHECK: This is a standard wallet account, and the program will verify its usage.                // Marketing wallet account (32 bytes)
     pub project_wallet: Pubkey,                   // Project wallet account (32 bytes)
     pub milestones: [Milestone; MAX_MILESTONES],  // Milestone data (variable size)
     pub current_market_cap: u64,                  // Current market cap (8 bytes)
@@ -384,6 +417,7 @@ pub struct InitializeProgram<'info> {
     pub global_state: Account<'info, GlobalState>,
 
     pub token_mint: Account<'info, Mint>, // Correct type for SPL Token Mint
+    /// CHECK: This is a standard wallet account, and the program will verify its usage
     pub burn_wallet: AccountInfo<'info>, // Standard wallet (not SPL Token Account)
     pub marketing_wallet: AccountInfo<'info>, // Standard wallet
     pub project_wallet: AccountInfo<'info>, // Standard wallet
@@ -437,6 +471,18 @@ pub struct ManageExemptWallet<'info> {
     pub authority: Signer<'info>, // Admin authority to sign the transaction
 }
 
+#[derive(Accounts)]
+pub struct UpdateMarketCap<'info> {
+    #[account(
+        mut,                                      // Global state is being updated
+        has_one = authority                       // Ensure authority matches the stored authority in global state
+    )]
+    pub global_state: Account<'info, GlobalState>, // Global state account
+    pub authority: Signer<'info>,                 // Signer (admin authority)
+}
+
+
+
 fn get_token_balance(token_account: AccountInfo) -> Result<u64> {
     // Use the spl_token::state::Account to access the token balance
     let data = spl_token::state::Account::unpack(&token_account.data.borrow()).map_err(|_| ErrorCode::TokenAccountCreationFailed)?;
@@ -480,4 +526,10 @@ pub struct MilestoneProcessed {
     pub wallet: Pubkey,
     pub unlocked_tokens: u64,
     pub milestone_index: u8,
+}
+
+#[event]
+pub struct MarketCapUpdated {
+    pub authority: Pubkey,    // Public key of the authority who triggered the update
+    pub market_cap: u64,      // The new market cap value
 }
