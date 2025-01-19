@@ -23,7 +23,7 @@ pub mod automated_presale {
         global_state.burn_wallet = ctx.accounts.burn_wallet.key();
         global_state.marketing_wallet = ctx.accounts.marketing_wallet.key();
         global_state.project_wallet = ctx.accounts.project_wallet.key();
-        global_state.token_price_oracle = ctx.accounts.token_price_oracle.key();
+        // global_state.token_price_oracle = ctx.accounts.token_price_oracle.key();
         global_state.current_market_cap = 0;
         global_state.current_milestone = 0;
         global_state.user_count = 0;
@@ -199,7 +199,7 @@ pub struct GlobalState {
     pub burn_wallet: Pubkey,
     pub marketing_wallet: Pubkey,
     pub project_wallet: Pubkey,
-    pub token_price_oracle: Pubkey,
+    // pub token_price_oracle: Pubkey,
     pub milestones: [Milestone; MAX_MILESTONES],
     pub current_market_cap: u64,
     pub current_milestone: u8,
@@ -266,7 +266,7 @@ pub struct InitializeProgram<'info> {
     #[account(mut)]
     pub marketing_wallet: Account<'info, TokenAccount>,
     pub project_wallet: Account<'info, TokenAccount>,
-    pub token_price_oracle: AccountInfo<'info>,
+    // pub token_price_oracle: AccountInfo<'info>,
     #[account(mut)]
     pub authority: Signer<'info>,
     pub system_program: Program<'info, System>,
