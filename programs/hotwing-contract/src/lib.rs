@@ -1,6 +1,7 @@
 use anchor_lang::prelude::*;
-use anchor_spl::token::{self, Token, TokenAccount};
+use anchor_spl::token::{self, Mint, Token, TokenAccount};
 use anchor_spl::associated_token::spl_associated_token_account::{self, get_associated_token_address}; 
+use solana_program::program_pack::Pack;
 
 
 declare_id!("L1dCurNdHKSmpRHFKGcaNf64qzExvCMGuZbU3uun6ow");
@@ -10,6 +11,7 @@ const THREE_MONTHS_SECONDS: i64 = 60 * 60 * 24 * 90;
 pub const MAX_MILESTONES: usize = 8;
 pub const MAX_USERS: usize = 1000;
 pub const MAX_HOLD_AMOUNT: u64 = 50000000; // Anti-whale restriction:
+pub const MAX_EXEMPTED_WALLETS: usize = 128; // Maximum exempted wallets
 
 /// Program module
 #[program]
@@ -31,6 +33,7 @@ pub mod automated_presale {
         global_state.three_month_unlock_date = Clock::get()?.unix_timestamp + THREE_MONTHS_SECONDS;
         global_state.unlock_complete = false;
         global_state.exempted_wallets = Vec::new();
+        msg!("Global state initialized with admin authority: {:?}", global_state.authority);
 
         // Milestones
         global_state.milestones = [
@@ -123,12 +126,12 @@ pub mod automated_presale {
     pub fn add_exempt_wallet(ctx: Context<ManageExemptWallet>, wallet: Pubkey) -> Result<()> {
         let global_state = &mut ctx.accounts.global_state;
     
-        // Check if wallet already exists in the exempted list
+        // Ensure the wallet is not already in the exempt list
         if !global_state.exempted_wallets.contains(&wallet) {
-            global_state.exempted_wallets.push(wallet); // Add new wallet
+            global_state.exempted_wallets.push(wallet); // Add wallet to the list
             msg!("Exempted wallet added: {:?}", wallet);
         } else {
-            msg!("Wallet already exempted: {:?}", wallet);
+            msg!("Wallet is already exempted: {:?}", wallet);
         }
     
         Ok(())
@@ -137,14 +140,14 @@ pub mod automated_presale {
     pub fn remove_exempt_wallet(ctx: Context<ManageExemptWallet>, wallet: Pubkey) -> Result<()> {
         let global_state = &mut ctx.accounts.global_state;
     
-        // Remove wallet from exempted list
+        // Remove wallet from the exempt list
         let original_count = global_state.exempted_wallets.len();
         global_state.exempted_wallets.retain(|&key| key != wallet);
     
         if original_count > global_state.exempted_wallets.len() {
             msg!("Exempted wallet removed: {:?}", wallet);
         } else {
-            msg!("Wallet not found in exempt list: {:?}", wallet);
+            msg!("Wallet was not found in the exempt list: {:?}", wallet);
         }
     
         Ok(())
@@ -306,19 +309,20 @@ pub mod automated_presale {
 }
 
 #[account]
+#[derive(Default)] // Add default implementation for easier initialization
 pub struct GlobalState {
-    pub token_mint: Pubkey,
-    pub burn_wallet: Pubkey,
-    pub marketing_wallet: Pubkey,
-    pub project_wallet: Pubkey,
-    // pub token_price_oracle: Pubkey,
-    pub milestones: [Milestone; MAX_MILESTONES],
-    pub current_market_cap: u64,
-    pub current_milestone: u8,
-    pub user_count: u64,
-    pub three_month_unlock_date: i64,
-    pub exempted_wallets: Vec<Pubkey>, // List of exempted wallets
-    pub unlock_complete: bool, // Flag to bypass anti-whale restrictions
+    pub authority: Pubkey,                        // Admin authority (32 bytes)
+    pub token_mint: Pubkey,                       // Token mint address (32 bytes)
+    pub burn_wallet: Pubkey,                      // Burn wallet account (32 bytes)
+    pub marketing_wallet: Pubkey,                 // Marketing wallet account (32 bytes)
+    pub project_wallet: Pubkey,                   // Project wallet account (32 bytes)
+    pub milestones: [Milestone; MAX_MILESTONES],  // Milestone data (variable size)
+    pub current_market_cap: u64,                  // Current market cap (8 bytes)
+    pub current_milestone: u8,                    // Current milestone index (1 byte)
+    pub user_count: u64,                          // Total user count (8 bytes)
+    pub three_month_unlock_date: i64,             // Unlock date (3 months) (8 bytes)
+    pub exempted_wallets: Vec<Pubkey>,            // List of exempt wallets (dynamic size - limit required!)
+    pub unlock_complete: bool,                    // Full unlock flag (1 byte)
 }
 
 // Constants for Milestone size
@@ -326,17 +330,20 @@ const MILESTONE_SIZE: usize = 8 + 1; // u64 (8 bytes) + u8 (1 byte)
 
 // Constants for the GlobalState size
 impl GlobalState {
-    pub const LEN: usize = 8  // Discriminator
-        + 32 // token_mint
-        + 32 // burn_wallet
-        + 32 // marketing_wallet
-        + 32 // project_wallet
-        + 32 // token_price_oracle
-        + (MAX_MILESTONES * MILESTONE_SIZE) // milestones array
-        + 8  // current_market_cap
-        + 1  // current_milestone
-        + 8  // user_count
-        + 8; // three_month_unlock_date
+    // Calculate the size of the GlobalState struct
+    pub const LEN: usize = 8
+        + 32                           // authority
+        + 32                                            // token_mint
+        + 32                                            // burn_wallet
+        + 32                                            // marketing_wallet
+        + 32                                            // project_wallet
+        + (MILESTONE_SIZE * MAX_MILESTONES)       // Fixed-size milestones
+        + 8                                             // current_market_cap
+        + 1                                             // current_milestone
+        + 8                                             // user_count
+        + 8                                             // three_month_unlock_date
+        + 4 + (32 * MAX_EXEMPTED_WALLETS)         // Exempted_wallets (Vec metadata + max size)
+        + 1;                                            // unlock_complete flag
 }
 
 // User entry structure (used for registering users)
@@ -365,7 +372,7 @@ impl MilestoneUnlockAccount {
 }
 
 // Milestone definition
-#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, Debug)]
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, Debug, Default)]
 pub struct Milestone {
     pub market_cap: u64, // Threshold market cap
     pub unlock_percent: u8, // Percentage of tokens unlocked
@@ -375,15 +382,16 @@ pub struct Milestone {
 pub struct InitializeProgram<'info> {
     #[account(init, payer = authority, space = 8 + GlobalState::LEN)]
     pub global_state: Account<'info, GlobalState>,
-    pub token_mint: Account<'info, TokenAccount>,
-    pub burn_wallet: Account<'info, TokenAccount>,
+
+    pub token_mint: Account<'info, Mint>, // Correct type for SPL Token Mint
+    pub burn_wallet: AccountInfo<'info>, // Standard wallet (not SPL Token Account)
+    pub marketing_wallet: AccountInfo<'info>, // Standard wallet
+    pub project_wallet: AccountInfo<'info>, // Standard wallet
+
     #[account(mut)]
-    pub marketing_wallet: Account<'info, TokenAccount>,
-    pub project_wallet: Account<'info, TokenAccount>,
-    // pub token_price_oracle: AccountInfo<'info>,
-    #[account(mut)]
-    pub authority: Signer<'info>,
-    pub system_program: Program<'info, System>,
+    pub authority: Signer<'info>, // Admin authority
+
+    pub system_program: Program<'info, System>, // System Program
 }
 
 #[derive(Accounts)]
@@ -419,14 +427,19 @@ pub struct UnlockTokens<'info> {
 
 #[derive(Accounts)] 
 pub struct ManageExemptWallet<'info> {
-    #[account(mut, has_one = authority)] // Verify authority
+    #[account(
+        mut,
+        has_one = authority, // Verify that the provided `Signer` matches the stored `authority`
+        constraint = authority.key() == global_state.authority @ ErrorCode::Unauthorized
+    )]
     pub global_state: Account<'info, GlobalState>, // Global configuration
-    pub authority: Signer<'info>,                 // Admin authority
+
+    pub authority: Signer<'info>, // Admin authority to sign the transaction
 }
 
 fn get_token_balance(token_account: AccountInfo) -> Result<u64> {
     // Use the spl_token::state::Account to access the token balance
-    let data = Account::unpack(&token_account.data.borrow())?;
+    let data = spl_token::state::Account::unpack(&token_account.data.borrow()).map_err(|_| ErrorCode::TokenAccountCreationFailed)?;
     Ok(data.amount)
 }
 
@@ -451,6 +464,8 @@ pub enum ErrorCode {
     TokenTransferFailed,
     #[msg("Next milestone not reached yet")]
     MiletoneNotReached,
+    #[msg("You are not authorized to perform this action.")]
+    Unauthorized,
 }
 
 #[event]
