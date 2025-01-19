@@ -9,6 +9,7 @@ declare_id!("L1dCurNdHKSmpRHFKGcaNf64qzExvCMGuZbU3uun6ow");
 const THREE_MONTHS_SECONDS: i64 = 60 * 60 * 24 * 90;
 pub const MAX_MILESTONES: usize = 8;
 pub const MAX_USERS: usize = 1000;
+pub const MAX_HOLD_AMOUNT: u64 = 50000000; // Anti-whale restriction:
 
 /// Program module
 #[program]
@@ -28,6 +29,8 @@ pub mod automated_presale {
         global_state.current_milestone = 0;
         global_state.user_count = 0;
         global_state.three_month_unlock_date = Clock::get()?.unix_timestamp + THREE_MONTHS_SECONDS;
+        global_state.unlock_complete = false;
+        global_state.exempted_wallets = Vec::new();
 
         // Milestones
         global_state.milestones = [
@@ -117,6 +120,36 @@ pub mod automated_presale {
         Ok(())
     }
 
+    pub fn add_exempt_wallet(ctx: Context<ManageExemptWallet>, wallet: Pubkey) -> Result<()> {
+        let global_state = &mut ctx.accounts.global_state;
+    
+        // Check if wallet already exists in the exempted list
+        if !global_state.exempted_wallets.contains(&wallet) {
+            global_state.exempted_wallets.push(wallet); // Add new wallet
+            msg!("Exempted wallet added: {:?}", wallet);
+        } else {
+            msg!("Wallet already exempted: {:?}", wallet);
+        }
+    
+        Ok(())
+    }
+
+    pub fn remove_exempt_wallet(ctx: Context<ManageExemptWallet>, wallet: Pubkey) -> Result<()> {
+        let global_state = &mut ctx.accounts.global_state;
+    
+        // Remove wallet from exempted list
+        let original_count = global_state.exempted_wallets.len();
+        global_state.exempted_wallets.retain(|&key| key != wallet);
+    
+        if original_count > global_state.exempted_wallets.len() {
+            msg!("Exempted wallet removed: {:?}", wallet);
+        } else {
+            msg!("Wallet not found in exempt list: {:?}", wallet);
+        }
+    
+        Ok(())
+    }
+
     /// Unlocks tokens automatically when milestone conditions are met
     pub fn process_milestones<'a, 'b, 'c, 'd, 'info>(ctx: Context<'a, 'b, 'c, 'd, UnlockTokens<'info>>, market_cap: u64) -> Result<()>
     where 'c: 'info, 'd: 'info, 'info: 'd {
@@ -124,15 +157,41 @@ pub mod automated_presale {
     
         // Update current market cap
         global_state.current_market_cap = market_cap;
+
+        // Check if the three-month unlock date has passed
+        let current_timestamp = Clock::get()?.unix_timestamp;
+
+        // Ensure full unlock bypasses anti-whale restrictions
+        if current_timestamp >= global_state.three_month_unlock_date || global_state.current_market_cap >= 2_500_000 {
+            msg!("Unlock conditions met: Anti-whale restrictions lifted. Full unlocking allowed.");
+            global_state.unlock_complete = true;
+        } else {
+            msg!("Unlock conditions not met: Three-month lock period still active.
+                All users are subject to anti-whale restrictions.");
+            global_state.unlock_complete = false;
+        }
     
+        let mut current_milestone_index = global_state.current_milestone as usize;
         // Iterate through milestones
-        while global_state.current_milestone < global_state.milestones.len() as u8 {
-            let milestone = &global_state.milestones[global_state.current_milestone as usize];
-    
+        let mut milestone = &global_state.milestones[current_milestone_index];
+
+        if current_milestone_index < MAX_MILESTONES {
+
             // If the current market cap is below the milestone threshold, stop processing
             if market_cap < milestone.market_cap {
-                break;
+                Err(ErrorCode::MiletoneNotReached)?;
+            } else {
+                while (current_milestone_index < MAX_MILESTONES)
+                    && (market_cap >= global_state.milestones[current_milestone_index].market_cap)
+                {
+                    current_milestone_index += 1;
+                }
+                
             }
+
+            // Update the current milestone index
+            global_state.current_milestone = current_milestone_index as u8;
+            milestone = &global_state.milestones[current_milestone_index];
     
             // Log milestone processing
             msg!(
@@ -140,7 +199,7 @@ pub mod automated_presale {
                 global_state.current_milestone,
                 milestone.unlock_percent
             );
-    
+
             // For each user, process token unlocking based on the milestone
             for user_index in 0..global_state.user_count {
                 // Derive the user PDA
@@ -170,17 +229,44 @@ pub mod automated_presale {
                     .checked_mul(milestone.unlock_percent as u64)
                     .ok_or::<anchor_lang::error::Error>(ErrorCode::ArithmeticOverflow.into())? // This will now work
                     / 100;
-    
-                let new_unlock = total_unlockable_tokens - user_state.unlocked_tokens;
-    
+
+                // Find the user's associated token account (ATA) in the remaining accounts
+                let ata_account_info = ctx
+                .remaining_accounts
+                .iter()
+                .find(|account| account.key == &user_state.ata)
+                .ok_or(ErrorCode::UserWalletNotFound)?;
+
+                let mut new_unlock: u64;
+                
+                if global_state.unlock_complete {
+                    new_unlock = user_state.total_locked_tokens;
+                    // Full unlock bypasses anti-whale restrictions
+                    msg!("Full unlock: {} tokens unlocked for user: {:?}", new_unlock, user_state.wallet);
+                } else {
+                    // Check if the user is exempted from anti-whale restrictions
+                    if global_state.exempted_wallets.contains(&user_state.wallet) {
+                        new_unlock = total_unlockable_tokens - user_state.unlocked_tokens;
+                        msg!("Exempted wallet: {} tokens unlocked for user: {:?}", new_unlock, user_state.wallet);
+                    } else {
+                        // Anti-whale restrictions apply
+                        new_unlock = total_unlockable_tokens - user_state.unlocked_tokens;
+                        // Fetch recipient's current token balance
+                        let recipient_balance = get_token_balance(ata_account_info.clone())?;
+                        // Calculate post-transfer balance
+                        let after_transfer_balance = recipient_balance + new_unlock;
+                        
+                        if after_transfer_balance > MAX_HOLD_AMOUNT {
+                            // Anti-whale restriction: Max 50,000,000 tokens can be held by a user now.
+                            let available_unlock = MAX_HOLD_AMOUNT - recipient_balance;
+                            new_unlock = available_unlock;
+                            msg!("Anti-whale restriction: {} tokens unlocked for user: {:?}", available_unlock, user_state.wallet);
+                            
+                        }
+                    }
+                }
+                
                 if new_unlock > 0 {
-                    // Find the user's associated token account (ATA) in the remaining accounts
-                    let ata_account_info = ctx
-                        .remaining_accounts
-                        .iter()
-                        .find(|account| account.key == &user_state.ata)
-                        .ok_or(ErrorCode::UserWalletNotFound)?;
-    
                     // Transfer tokens from the project wallet to the user's ATA using a CPI
                     let cpi_accounts = token::Transfer {
                         from: ctx.accounts.project_wallet.to_account_info(),
@@ -195,6 +281,8 @@ pub mod automated_presale {
     
                     // Update the user's unlocked token count
                     user_state.unlocked_tokens += new_unlock;
+                    user_state.total_locked_tokens -= new_unlock;
+                    user_state.last_unlocked_milestone = global_state.current_milestone;
 
                     emit!(MilestoneProcessed {
                         wallet: user_state.wallet,
@@ -211,8 +299,6 @@ pub mod automated_presale {
                 }
             }
     
-            // Move to the next milestone
-            global_state.current_milestone += 1;
         }
     
         Ok(())
@@ -231,6 +317,8 @@ pub struct GlobalState {
     pub current_milestone: u8,
     pub user_count: u64,
     pub three_month_unlock_date: i64,
+    pub exempted_wallets: Vec<Pubkey>, // List of exempted wallets
+    pub unlock_complete: bool, // Flag to bypass anti-whale restrictions
 }
 
 // Constants for Milestone size
@@ -329,6 +417,19 @@ pub struct UnlockTokens<'info> {
     pub token_program: Program<'info, Token>,
 }
 
+#[derive(Accounts)] 
+pub struct ManageExemptWallet<'info> {
+    #[account(mut, has_one = authority)] // Verify authority
+    pub global_state: Account<'info, GlobalState>, // Global configuration
+    pub authority: Signer<'info>,                 // Admin authority
+}
+
+fn get_token_balance(token_account: AccountInfo) -> Result<u64> {
+    // Use the spl_token::state::Account to access the token balance
+    let data = Account::unpack(&token_account.data.borrow())?;
+    Ok(data.amount)
+}
+
 // Error codes
 #[error_code]
 pub enum ErrorCode {
@@ -348,6 +449,8 @@ pub enum ErrorCode {
     AccountNotEnough,
     #[msg("Token transfer failed")]
     TokenTransferFailed,
+    #[msg("Next milestone not reached yet")]
+    MiletoneNotReached,
 }
 
 #[event]
