@@ -54,6 +54,14 @@ pub mod automated_presale {
         }
     
         for entry in entries.iter() {
+
+            // First, verify if the user is already registered
+            for account_info in ctx.remaining_accounts.iter() {
+                if account_info.key == &entry.wallet { // Check if wallet already exists
+                    return Err(ErrorCode::UserAlreadyRegistered.into());
+                }
+            }
+
             // Derive the user's associated token account (ATA)
             let user_ata = get_associated_token_address(&entry.wallet, &global_state.token_mint);
     
@@ -74,7 +82,7 @@ pub mod automated_presale {
                         ctx.accounts.rent.to_account_info(),
                         ctx.accounts.token_program.to_account_info(),
                     ],
-                )?;
+                ).map_err(|_| ErrorCode::TokenAccountCreationFailed)?;
                 msg!("Created ATA for user: {:?}", entry.wallet);
             }
     
@@ -89,6 +97,13 @@ pub mod automated_presale {
     
             // Increment total user count in global state
             global_state.user_count += 1;
+
+            // Emit the `UserRegistered` event
+            emit!(UserRegistered {
+                wallet: entry.wallet,
+                locked_tokens: entry.locked_tokens,
+                ata: user_ata,
+            });
     
             // Emit a message for storage confirmation
             msg!(
@@ -133,6 +148,11 @@ pub mod automated_presale {
                     &[b"user_state", &user_index.to_le_bytes()],
                     ctx.program_id,
                 );
+
+                if ctx.remaining_accounts.len() < global_state.user_count as usize * 2 {
+                    // Each user must have a PDA and an ATA in remaining accounts
+                    return Err(ErrorCode::AccountNotEnough.into());
+                }
     
                 // Fetch user's state account from the remaining accounts provided
                 let user_account_info = ctx
@@ -171,10 +191,16 @@ pub mod automated_presale {
                     token::transfer(
                         CpiContext::new(ctx.accounts.token_program.to_account_info(), cpi_accounts),
                         new_unlock,
-                    )?;
+                    ).map_err(|_| ErrorCode::TokenTransferFailed)?;
     
                     // Update the user's unlocked token count
                     user_state.unlocked_tokens += new_unlock;
+
+                    emit!(MilestoneProcessed {
+                        wallet: user_state.wallet,
+                        unlocked_tokens: new_unlock,
+                        milestone_index: global_state.current_milestone,
+                    });
     
                     // Log the unlocking process
                     msg!(
@@ -318,4 +344,22 @@ pub enum ErrorCode {
     UserNotFound, 
     #[msg("User's associated token account (ATA) not found in remaining accounts.")]
     UserWalletNotFound, 
+    #[msg("User's accounts not enough in remaining accounts.")]
+    AccountNotEnough,
+    #[msg("Token transfer failed")]
+    TokenTransferFailed,
+}
+
+#[event]
+pub struct UserRegistered {
+    pub wallet: Pubkey,
+    pub locked_tokens: u64,
+    pub ata: Pubkey,
+}
+
+#[event]
+pub struct MilestoneProcessed {
+    pub wallet: Pubkey,
+    pub unlocked_tokens: u64,
+    pub milestone_index: u8,
 }
