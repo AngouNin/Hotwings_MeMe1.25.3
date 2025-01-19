@@ -22,6 +22,11 @@ pub mod automated_presale {
     /// Initialize the program with milestones and setup global state
     pub fn initialize_program(ctx: Context<InitializeProgram>) -> Result<()> {
         let global_state = &mut ctx.accounts.global_state;
+        // Ensure burn_wallet is a valid writable account
+        let burn_wallet_account = &ctx.accounts.burn_wallet;
+        if !burn_wallet_account.is_writable {
+            return Err(ErrorCode::InvalidBurnWallet.into());
+        }
 
         global_state.token_mint = ctx.accounts.token_mint.key(); 
         global_state.burn_wallet = ctx.accounts.burn_wallet.key();
@@ -512,6 +517,8 @@ pub enum ErrorCode {
     MiletoneNotReached,
     #[msg("You are not authorized to perform this action.")]
     Unauthorized,
+    #[msg("Invalid burn wallet account")]
+    InvalidBurnWallet,
 }
 
 #[event]
