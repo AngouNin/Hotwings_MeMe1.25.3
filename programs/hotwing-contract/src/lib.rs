@@ -27,7 +27,7 @@ pub mod hotwing_contract {
     use super::*;
 
     /// Initialize the program with milestones and setup global state
-    pub fn initialize_program(ctx: Context<InitializeProgram>) -> Result<()> {
+    pub fn initialize_program(ctx: Context<InitializeProgram>, raydium_program_id: Pubkey) -> Result<()> {
         let global_state = &mut ctx.accounts.global_state;
         // Ensure burn_wallet is a valid writable account
         let burn_wallet_account = &ctx.accounts.burn_wallet;
@@ -55,7 +55,7 @@ pub mod hotwing_contract {
         global_state.unlock_complete = false;
         global_state.exempted_wallets = Vec::new();
         msg!("Global state initialized with admin authority: {:?}", global_state.authority);
-
+        
         // Milestones
         global_state.milestones = [
             Milestone { market_cap: 45_000, unlock_percent: 10 },
@@ -67,6 +67,9 @@ pub mod hotwing_contract {
             Milestone { market_cap: 1_574_000, unlock_percent: 70 },
             Milestone { market_cap: 2_500_000, unlock_percent: 100 },
         ];
+
+        global_state.raydium_program_id = raydium_program_id;
+        msg!("Global state initialized successfully with Raydium program ID: {:?}", raydium_program_id);
 
         Ok(())
     }
@@ -466,6 +469,22 @@ pub mod hotwing_contract {
         Ok(())
     }
 
+    pub fn update_raydium_program_id(ctx: Context<UpdateRaydiumProgramId>, new_raydium_program_id: Pubkey) -> Result<()> {
+        let global_state = &mut ctx.accounts.global_state;
+    
+        // Ensure only the authority can execute this instruction
+        if ctx.accounts.authority.key() != global_state.authority {
+            return Err(ErrorCode::Unauthorized.into());
+        }
+    
+        // Update the Raydium program ID
+        global_state.raydium_program_id = new_raydium_program_id;
+    
+        msg!("Raydium program ID updated to: {:?}", new_raydium_program_id);
+    
+        Ok(())
+    }
+
 }
 
 // <<<<<<<<<<<<<<< PLACE THIS OUTSIDE THE #[program] BLOCK >>>>>>>>>>>>>>>
@@ -481,13 +500,13 @@ pub fn on_transfer(
 ) -> Result<()> {
     let account_iter = &mut accounts.iter();
 
-    // (1) Extract necessary accounts from account list
-    let source_account = next_account_info(account_iter)?; // Source account (sending tokens)
-    let destination_account = next_account_info(account_iter)?; // Destination account
-    let global_state_account = next_account_info(account_iter)?; // Global state account
-    let project_wallet_account = next_account_info(account_iter)?; // Project wallet
+    // (1) Extract necessary accounts from the account list
+    let source_account = next_account_info(account_iter)?;           // Source account (sending tokens)
+    let destination_account = next_account_info(account_iter)?;      // Destination account
+    let global_state_account = next_account_info(account_iter)?;     // Global state account
+    let project_wallet_account = next_account_info(account_iter)?;   // Project wallet to redirect tokens
 
-    // (2) Fetch and Deserialize the GlobalState account
+    // (2) Fetch and deserialize the GlobalState account
     let global_state: GlobalState = GlobalState::try_from_slice(&global_state_account.data.borrow())
         .map_err(|_| ProgramError::InvalidAccountData)?;
 
@@ -515,7 +534,7 @@ pub fn on_transfer(
             &spl_token_2022::id(),
             source_account.key,
             project_wallet_account.key,
-            source_account.key, // This could also be the authority
+            source_account.key, // Must be signed by source authority
             &[],
             amount,
         );
@@ -529,7 +548,7 @@ pub fn on_transfer(
             ],
         )?;
 
-        // Optionally, log post-transfer
+        // Log post-transfer
         msg!("Tokens redirected to project wallet.");
     } else {
         msg!("Normal transfer logic executed.");
@@ -568,13 +587,14 @@ pub fn register_transfer_hook(ctx: Context<RegisterHook>) -> Result<()> {
             data,
         })
     }
+
     // Program ID to set as the TransferHook handler (your program's ID)
     let transfer_hook_program_id = crate::id();
 
     // Construct the instruction to update the transfer hook
     let update_ix = update_transfer_hook(
         &token_2022_program_id(),                     // SPL Token-2022 program
-        &ctx.accounts.token_mint.key(),              // Address of Token-2022 mint
+        &ctx.accounts.token_mint.key(),              // Token-2022 mint address
         Some(&transfer_hook_program_id),             // Program to be set as the transfer-hook handler
         &ctx.accounts.authority.key(),               // Authority that manages the token mint
     )?;
@@ -775,6 +795,16 @@ pub struct RegisterHook<'info> {
     pub token_program: Program<'info, Token2022>,
 }
 
+#[derive(Accounts)]
+pub struct UpdateRaydiumProgramId<'info> {
+    #[account(
+        mut,
+        has_one = authority @ ErrorCode::Unauthorized // Ensure authority matches the one in GlobalState
+    )]
+    pub global_state: Account<'info, GlobalState>, // Global state account
+    pub authority: Signer<'info>, // Admin authority
+}
+
 
 fn get_token_balance(token_account: &AccountInfo) -> Result<u64> {
     // Use the spl_token::state::Account to access the token balance
@@ -785,9 +815,22 @@ fn get_token_balance(token_account: &AccountInfo) -> Result<u64> {
 pub struct RaydiumTransactionHelper;
 
 impl RaydiumTransactionHelper {
-    /// Returns true if the source account is from Raydium's program
+    /// Checks if the source account belongs to Raydium's Program
     pub fn is_raydium_transaction(source_account: &AccountInfo, raydium_program_id: Pubkey) -> bool {
-        return source_account.owner == &raydium_program_id;
+        // Check if the source account's owner matches Raydium's program ID
+        if source_account.owner == &raydium_program_id {
+            msg!("Raydium transaction detected for source account: {:?}", source_account.key);
+            return true;
+        }
+
+        // Log for non-Raydium transactions (optional, for debugging)
+        msg!(
+            "Source account {:?} is not owned by Raydium. Owner: {:?}",
+            source_account.key,
+            source_account.owner
+        );
+
+        return false;
     }
 }
 
