@@ -27,6 +27,14 @@ pub mod automated_presale {
         if !burn_wallet_account.is_writable {
             return Err(ErrorCode::InvalidBurnWallet.into());
         }
+        let marketing_wallet_account = &ctx.accounts.marketing_wallet;
+        if !marketing_wallet_account.is_writable {
+            return Err(ErrorCode::InvalidMarketingWallet.into());
+        }
+        let project_wallet_account = &ctx.accounts.project_wallet;
+        if !project_wallet_account.is_writable {
+            return Err(ErrorCode::InvalidProjectWallet.into());
+        }
 
         global_state.token_mint = ctx.accounts.token_mint.key(); 
         global_state.burn_wallet = ctx.accounts.burn_wallet.key();
@@ -179,7 +187,7 @@ pub mod automated_presale {
             // Trigger auto-sell logic if not already triggered
             if !global_state.auto_sell_triggered {
                 msg!("Triggering auto-sell mechanism...");
-                trigger_auto_sell(&ctx)?; // Call the auto-sell function
+                // trigger_auto_sell(&ctx)?; // Call the auto-sell function
                 global_state.auto_sell_triggered = true; // Mark auto-sell as completed
             } else {
                 msg!("Auto-sell already triggered. Skipping...");
@@ -435,7 +443,9 @@ pub struct InitializeProgram<'info> {
     pub token_mint: Account<'info, Mint>, // Correct type for SPL Token Mint
     /// CHECK: This is a standard wallet account, and the program will verify its usage
     pub burn_wallet: AccountInfo<'info>, // Standard wallet (not SPL Token Account)
+    /// CHECK: This is a standard wallet account, and the program will verify its usage
     pub marketing_wallet: AccountInfo<'info>, // Standard wallet
+    /// CHECK: This is a standard wallet account, and the program will verify its usage
     pub project_wallet: AccountInfo<'info>, // Standard wallet
 
     #[account(mut)]
@@ -508,48 +518,48 @@ fn get_token_balance(token_account: AccountInfo) -> Result<u64> {
     Ok(data.amount)
 }
 
-fn trigger_auto_sell(ctx: &Context<UnlockTokens>) -> Result<()> {
-    let global_state = &ctx.accounts.global_state;
-    let project_wallet = &ctx.accounts.project_wallet;
+// fn trigger_auto_sell(ctx: &Context<UnlockTokens>) -> Result<()> {
+//     let global_state = &ctx.accounts.global_state;
+//     let project_wallet = &ctx.accounts.project_wallet;
 
-    // Fetch Project Wallet balance
-    let project_wallet_balance = get_token_balance(ctx.accounts.project_wallet.to_account_info())?;
-    if project_wallet_balance == 0 {
-        return Err(ErrorCode::InsufficientFundsForAutoSell.into());
-    }
+//     // Fetch Project Wallet balance
+//     let project_wallet_balance = get_token_balance(ctx.accounts.project_wallet.to_account_info())?;
+//     if project_wallet_balance == 0 {
+//         return Err(ErrorCode::InsufficientFundsForAutoSell.into());
+//     }
 
-    // Calculate 25% of the Project Wallet balance for auto-sell
-    let sell_amount = project_wallet_balance
-        .checked_div(4) // 25% of tokens
-        .ok_or(ErrorCode::ArithmeticOverflow)?;
+//     // Calculate 25% of the Project Wallet balance for auto-sell
+//     let sell_amount = project_wallet_balance
+//         .checked_div(4) // 25% of tokens
+//         .ok_or(ErrorCode::ArithmeticOverflow)?;
 
-    // Ensure the sell amount is greater than 0
-    if sell_amount == 0 {
-        return Err(ErrorCode::InsufficientSellAmount.into());
-    }
+//     // Ensure the sell amount is greater than 0
+//     if sell_amount == 0 {
+//         return Err(ErrorCode::InsufficientSellAmount.into());
+//     }
 
-    msg!("Initiating auto-sell of {} tokens for liquidity...", sell_amount);
+//     msg!("Initiating auto-sell of {} tokens for liquidity...", sell_amount);
 
-    // --- Add Raydium/Orca Swap CPI Logic Here ---
-    // For example: You'd interact with Raydium's AMM program to perform the token swap.
-    // Example: Transfer tokens from Project Wallet and swap via Raydium.
-    // (Details provided earlier on how to use CPI with Raydium's AMM).
+//     // --- Add Raydium/Orca Swap CPI Logic Here ---
+//     // For example: You'd interact with Raydium's AMM program to perform the token swap.
+//     // Example: Transfer tokens from Project Wallet and swap via Raydium.
+//     // (Details provided earlier on how to use CPI with Raydium's AMM).
 
-    // Alternatively, you can emit an event for off-chain bots to execute Raydium swap:
-    emit!(AutoSellTriggered {
-        sell_amount,
-        wallet: project_wallet.key(), // Project Wallet performing the transaction
-        destination: ctx.accounts.liquidity_wallet.key(), // Liquidity destination wallet
-    });
+//     // Alternatively, you can emit an event for off-chain bots to execute Raydium swap:
+//     emit!(AutoSellTriggered {
+//         sell_amount,
+//         wallet: project_wallet.key(), // Project Wallet performing the transaction
+//         destination: ctx.accounts.liquidity_wallet.key(), // Liquidity destination wallet
+//     });
 
-    msg!(
-        "Auto-sell triggered: {} tokens sold from {:?}",
-        sell_amount,
-        project_wallet.key()
-    );
+//     msg!(
+//         "Auto-sell triggered: {} tokens sold from {:?}",
+//         sell_amount,
+//         project_wallet.key()
+//     );
 
-    Ok(())
-}
+//     Ok(())
+// }
 
 // Error codes
 #[error_code]
@@ -580,6 +590,10 @@ pub enum ErrorCode {
     InsufficientFundsForAutoSell,
     #[msg("Insufficient sell amount for auto-sell")]
     InsufficientSellAmount,
+    #[msg("Invalid marketing wallet account")]
+    InvalidMarketingWallet,
+    #[msg("Invalid project wallet account")]
+    InvalidProjectWallet,
 }
 
 #[event]
