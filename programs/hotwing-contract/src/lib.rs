@@ -26,6 +26,7 @@ pub mod automated_presale {
         let burn_wallet_account = &ctx.accounts.burn_wallet;
         if !burn_wallet_account.is_writable {
             return Err(ErrorCode::InvalidBurnWallet.into());
+            
         }
         let marketing_wallet_account = &ctx.accounts.marketing_wallet;
         if !marketing_wallet_account.is_writable {
@@ -357,80 +358,98 @@ pub mod automated_presale {
         );
     
         Ok(())
-    }
+    } 
 
     pub fn register_user_on_project_wallet_transfer(
         ctx: Context<RegisterUserOnTransfer>,
-        user_wallet: Pubkey,   // The user wallet that sent tokens to the Project Wallet
-        locked_amount: u64,    // The locked amount to track
+        user_wallet: Pubkey, // The wallet address of the user
+        locked_amount: u64,  // The locked token amount to track
     ) -> Result<()> {
         let global_state = &mut ctx.accounts.global_state;
-        let user_state = &mut ctx.accounts.user_state;
-    
-        // STEP 1: Check if user PDA already exists and update it
-        if user_state.wallet == Pubkey::default() {
-            // New user registration
-            user_state.wallet = user_wallet;     // Store user's wallet address
-            user_state.ata = get_associated_token_address(&user_wallet, &global_state.token_mint); // User's ATA
-            user_state.total_locked_tokens = locked_amount; // Store the locked tokens
-            user_state.unlocked_tokens = 0;     // Initially, 0 unlocked tokens
-            user_state.last_unlocked_milestone = 0; // No milestones unlocked yet
-    
-            // Increment global user count
-            global_state.user_count += 1;
-    
-            msg!(
-                "Registered new user: {:?}, Locked Tokens: {}, ATA: {:?}",
-                user_state.wallet,
-                user_state.total_locked_tokens,
-                user_state.ata
+
+        // STEP 1: Derive the User PDA
+        let (user_pda, bump) = Pubkey::find_program_address(
+            &[b"user_state", user_wallet.as_ref()], // PDA seeds
+            ctx.program_id,
+        );
+
+        // Ensure that the provided PDA matches the derived address
+        if ctx.accounts.user_state.key() != user_pda {
+            return Err(ErrorCode::UserNotFound.into());
+        }
+
+        // STEP 2: Deserialize PDA or Initialize If Necessary
+        if ctx.accounts.user_state.data_is_empty() {
+            // If the PDA is empty, initialize it
+            let lamports = Rent::get()?.minimum_balance(MilestoneUnlockAccount::LEN);
+
+            let create_instruction = solana_program::system_instruction::create_account(
+                &ctx.accounts.authority.key(), // Payer
+                &user_pda,                     // New PDA
+                lamports,                      // Rent exemption
+                MilestoneUnlockAccount::LEN as u64, // Space required
+                ctx.program_id,                // PDA owner = this program
             );
+
+            solana_program::program::invoke_signed(
+                &create_instruction,
+                &[
+                    ctx.accounts.system_program.to_account_info(),
+                    ctx.accounts.user_state.to_account_info(),
+                    ctx.accounts.authority.to_account_info(),
+                ],
+                &[&[b"user_state", user_wallet.as_ref(), &[bump]]], // PDA seeds and bump
+            )?;
+
+            // Initialize state manually now that PDA is created
+            let mut data = ctx.accounts.user_state.try_borrow_mut_data()?;
+            let milestone_state = MilestoneUnlockAccount {
+                wallet: user_wallet,
+                ata: get_associated_token_address(&user_wallet, &global_state.token_mint),
+                total_locked_tokens: locked_amount,
+                unlocked_tokens: 0,
+                last_unlocked_milestone: 0,
+            };
+
+            // Serialize the initialized state into the PDA's account
+            milestone_state.serialize(&mut &mut data[..])?;
+
+            msg!(
+                "Initialized and registered new PDA for user {:?} with locked tokens: {}",
+                user_wallet,
+                locked_amount
+            );
+
+            global_state.user_count += 1;
         } else {
-            // User already exists: Update locked token balance
-            user_state.total_locked_tokens = user_state
+            // PDA exists: Deserialize the data
+            let mut data = ctx.accounts.user_state.try_borrow_mut_data()?;
+            let mut milestone_account =
+                MilestoneUnlockAccount::try_from_slice(&data).map_err(|_| ErrorCode::DeserializationFailed)?;
+
+            // Update the existing PDA data
+            milestone_account.total_locked_tokens = milestone_account
                 .total_locked_tokens
                 .checked_add(locked_amount)
                 .ok_or(ErrorCode::ArithmeticOverflow)?;
-    
+
+            // Serialize the updated data back into the PDA's account
+            milestone_account.serialize(&mut &mut data[..])?;
+
             msg!(
-                "Updated user: {:?}, New Locked Tokens: {}",
-                user_state.wallet,
-                user_state.total_locked_tokens
+                "Updated user PDA: {:?} with additional locked tokens: {}",
+                user_wallet,
+                locked_amount
             );
         }
-    
-        // STEP 2: Ensure User's ATA Exists
-        // Generate the user's associated token account (ATA)
-        let user_ata = get_associated_token_address(&user_wallet, &global_state.token_mint);
-        if ctx.remaining_accounts.iter().find(|acc| acc.key == &user_ata).is_none() {
-            // If the user's ATA does not already exist, create it using CPI
-            let ata_instruction = spl_associated_token_account::instruction::create_associated_token_account(
-                &ctx.accounts.authority.key(),
-                &user_wallet,
-                &global_state.token_mint,
-                &token_program_id
-            );
-            anchor_lang::solana_program::program::invoke(
-                &ata_instruction,
-                &[
-                    ctx.accounts.authority.to_account_info(),
-                    user_state.to_account_info(),
-                    ctx.accounts.system_program.to_account_info(),
-                    ctx.accounts.rent.to_account_info(),
-                    ctx.accounts.token_program.to_account_info(),
-                ],
-            ).map_err(|_| ErrorCode::TokenAccountCreationFailed)?;
-    
-            msg!("Created user's ATA: {:?}", user_ata);
-        }
-    
-        // Emit the UserRegistered event
+
+        // STEP 3: Emit Event
         emit!(UserRegistered {
             wallet: user_wallet,
             locked_tokens: locked_amount,
-            ata: user_ata,
+            ata: get_associated_token_address(&user_wallet, &global_state.token_mint),
         });
-    
+
         Ok(())
     }
 }
@@ -588,24 +607,18 @@ pub struct UpdateMarketCap<'info> {
 #[derive(Accounts)]
 pub struct RegisterUserOnTransfer<'info> {
     #[account(mut)]
-    pub global_state: Account<'info, GlobalState>, // Global state that stores overall configuration
+    pub global_state: Account<'info, GlobalState>, // Global state account that stores global data
     #[account(mut)]
-    pub project_wallet: Account<'info, TokenAccount>, // Project wallet receiving tokens
+    pub project_wallet: Account<'info, TokenAccount>, // Project wallet receiving locked tokens
     #[account(mut)]
-    pub authority: Signer<'info>,                // Signer (caller) of this function
-    pub rent: Sysvar<'info, Rent>,               // Rent sysvar
-    pub system_program: Program<'info, System>,  // System program for account initialization
-    pub token_program: Program<'info, Token>,    // SPL Token program for ATA creation
-    /// CHECK: Associated Token Program (unchecked for now)
+    pub authority: Signer<'info>, // The signer who calls this transaction (payer for accounts)
+    pub rent: Sysvar<'info, Rent>, // Rent sysvar
+    pub system_program: Program<'info, System>,  // System program (for creating PDAs)
+    pub token_program: Program<'info, Token>, // SPL Token Program for token transfers
+    /// CHECK: Associated Token Program
     pub associated_token_program: AccountInfo<'info>,
-    #[account(
-        init_if_needed,                               // Initializes User's PDA if it doesn't exist
-        seeds = [b"user_state", user_wallet.key().as_ref()], // PDA seeds (b"user_state" + user pubkey)
-        bump,                                         // Automatically find PDA bump
-        payer = authority,                            // The signer pays for the PDA creation
-        space = 8 + MilestoneUnlockAccount::LEN       // Allocate PDA space
-    )]
-    pub user_state: Account<'info, MilestoneUnlockAccount>, // User's PDA account
+    #[account(mut)] // User state PDA manually validated inside the function
+    pub user_state: AccountInfo<'info>, // User-specific PDA account
 }
 
 
@@ -692,6 +705,8 @@ pub enum ErrorCode {
     InvalidMarketingWallet,
     #[msg("Invalid project wallet account")]
     InvalidProjectWallet,
+    #[msg("Deserialization failed")]
+    DeserializationFailed,
 }
 
 #[event]
