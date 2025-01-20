@@ -727,6 +727,7 @@ pub struct RegisterUsers<'info> {
         payer = authority, // Specify who pays for account creation
         space = 8 + MilestoneUnlockAccount::LEN // Allocate space for MilestoneUnlockAccount state
     )]
+     ///CHECK: User state PDA account
     pub user_state: Account<'info, MilestoneUnlockAccount>, // User PDA for milestone token tracking
 }
 
@@ -781,6 +782,7 @@ pub struct RegisterUserOnTransfer<'info> {
     /// CHECK: Associated Token Program
     pub associated_token_program: AccountInfo<'info>,
     #[account(mut)] // User state PDA manually validated inside the function
+    ///CHECK: User state PDA account
     pub user_state: AccountInfo<'info>, // User-specific PDA account
 }
 
