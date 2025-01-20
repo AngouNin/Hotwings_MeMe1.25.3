@@ -18,17 +18,16 @@ const THREE_MONTHS_SECONDS: i64 = 60 * 60 * 24 * 90;
 pub const MAX_MILESTONES: usize = 8;
 pub const MAX_USERS: usize = 1000;
 pub const MAX_HOLD_AMOUNT: u64 = 50000000; // Anti-whale restriction:
-pub const MAX_EXEMPTED_WALLETS: usize = 128; // Maximum exempted wallets
+pub const MAX_EXEMPTED_WALLETS: usize = 20; // Maximum exempted wallets
 
 /// Program module
 #[program]
 pub mod hotwing_contract {
     use anchor_spl::{associated_token::{get_associated_token_address, spl_associated_token_account}, token};
-
     use super::*;
 
     /// Initialize the program with milestones and setup global state
-    pub fn initialize_program(ctx: Context<InitializeProgram>) -> Result<()> {
+    pub fn initialize_program(ctx: Context<InitializeProgram>, raydium_program_id: Pubkey) -> Result<()> {
         let global_state = &mut ctx.accounts.global_state;
         // Ensure burn_wallet is a valid writable account
         let burn_wallet_account = &ctx.accounts.burn_wallet;
@@ -48,8 +47,7 @@ pub mod hotwing_contract {
         global_state.token_mint = ctx.accounts.token_mint.key(); 
         global_state.burn_wallet = ctx.accounts.burn_wallet.key();
         global_state.marketing_wallet = ctx.accounts.marketing_wallet.key();
-        global_state.project_wallet = ctx.accounts.project_wallet.key();
-        // global_state.token_price_oracle = ctx.accounts.token_price_oracle.key();
+        global_state.project_wallet = ctx.accounts.project_wallet.key(); 
         global_state.current_market_cap = 0;
         global_state.current_milestone = 0;
         global_state.user_count = 0;
@@ -57,7 +55,7 @@ pub mod hotwing_contract {
         global_state.unlock_complete = false;
         global_state.exempted_wallets = Vec::new();
         msg!("Global state initialized with admin authority: {:?}", global_state.authority);
-
+        
         // Milestones
         global_state.milestones = [
             Milestone { market_cap: 45_000, unlock_percent: 10 },
@@ -70,10 +68,11 @@ pub mod hotwing_contract {
             Milestone { market_cap: 2_500_000, unlock_percent: 100 },
         ];
 
+        global_state.raydium_program_id = raydium_program_id;
+        msg!("Global state initialized successfully with Raydium program ID: {:?}", raydium_program_id);
+
         Ok(())
     }
-
-    
 
     /// Registers multiple users and creates their token accounts (if missing)
     pub fn register_users(ctx: Context<RegisterUsers>, entries: Vec<UserEntry>) -> Result<()> {
@@ -470,6 +469,22 @@ pub mod hotwing_contract {
         Ok(())
     }
 
+    pub fn update_raydium_program_id(ctx: Context<UpdateRaydiumProgramId>, new_raydium_program_id: Pubkey) -> Result<()> {
+        let global_state = &mut ctx.accounts.global_state;
+    
+        // Ensure only the authority can execute this instruction
+        if ctx.accounts.authority.key() != global_state.authority {
+            return Err(ErrorCode::Unauthorized.into());
+        }
+    
+        // Update the Raydium program ID
+        global_state.raydium_program_id = new_raydium_program_id;
+    
+        msg!("Raydium program ID updated to: {:?}", new_raydium_program_id);
+    
+        Ok(())
+    }
+
 }
 
 // <<<<<<<<<<<<<<< PLACE THIS OUTSIDE THE #[program] BLOCK >>>>>>>>>>>>>>>
@@ -485,13 +500,13 @@ pub fn on_transfer(
 ) -> Result<()> {
     let account_iter = &mut accounts.iter();
 
-    // (1) Extract necessary accounts from account list
-    let source_account = next_account_info(account_iter)?; // Source account (sending tokens)
-    let destination_account = next_account_info(account_iter)?; // Destination account
-    let global_state_account = next_account_info(account_iter)?; // Global state account
-    let project_wallet_account = next_account_info(account_iter)?; // Project wallet
+    // (1) Extract necessary accounts from the account list
+    let source_account = next_account_info(account_iter)?;           // Source account (sending tokens)
+    let destination_account = next_account_info(account_iter)?;      // Destination account
+    let global_state_account = next_account_info(account_iter)?;     // Global state account
+    let project_wallet_account = next_account_info(account_iter)?;   // Project wallet to redirect tokens
 
-    // (2) Fetch and Deserialize the GlobalState account
+    // (2) Fetch and deserialize the GlobalState account
     let global_state: GlobalState = GlobalState::try_from_slice(&global_state_account.data.borrow())
         .map_err(|_| ProgramError::InvalidAccountData)?;
 
@@ -519,7 +534,7 @@ pub fn on_transfer(
             &spl_token_2022::id(),
             source_account.key,
             project_wallet_account.key,
-            source_account.key, // This could also be the authority
+            source_account.key, // Must be signed by source authority
             &[],
             amount,
         );
@@ -533,7 +548,7 @@ pub fn on_transfer(
             ],
         )?;
 
-        // Optionally, log post-transfer
+        // Log post-transfer
         msg!("Tokens redirected to project wallet.");
     } else {
         msg!("Normal transfer logic executed.");
@@ -572,13 +587,14 @@ pub fn register_transfer_hook(ctx: Context<RegisterHook>) -> Result<()> {
             data,
         })
     }
+
     // Program ID to set as the TransferHook handler (your program's ID)
     let transfer_hook_program_id = crate::id();
 
     // Construct the instruction to update the transfer hook
     let update_ix = update_transfer_hook(
         &token_2022_program_id(),                     // SPL Token-2022 program
-        &ctx.accounts.token_mint.key(),              // Address of Token-2022 mint
+        &ctx.accounts.token_mint.key(),              // Token-2022 mint address
         Some(&transfer_hook_program_id),             // Program to be set as the transfer-hook handler
         &ctx.accounts.authority.key(),               // Authority that manages the token mint
     )?;
@@ -614,8 +630,7 @@ pub struct GlobalState {
     pub user_count: u64,                          // Total user count (8 bytes)
     pub three_month_unlock_date: i64,             // Unlock date (3 months) (8 bytes)
     pub exempted_wallets: Vec<Pubkey>,            // List of exempt wallets (dynamic size - limit required!)
-    pub unlock_complete: bool,                    // Full unlock flag (1 byte)
-    pub auto_sell_triggered: bool,
+    pub unlock_complete: bool,                    // Full unlock flag (1 byte) 
     pub raydium_program_id: Pubkey,               // Program ID of Raydium AMM (32 bytes)
 }
 
@@ -743,8 +758,9 @@ pub struct ManageExemptWallet<'info> {
 #[derive(Accounts)]
 pub struct UpdateMarketCap<'info> {
     #[account(
-        mut,                                      // Global state is being updated
-        has_one = authority                       // Ensure authority matches the stored authority in global state
+        mut,
+        has_one = authority, // Verify that the provided `Signer` matches the stored `authority`
+        constraint = authority.key() == global_state.authority @ ErrorCode::Unauthorized
     )]
     pub global_state: Account<'info, GlobalState>, // Global state account
     pub authority: Signer<'info>,                 // Signer (admin authority)
@@ -779,71 +795,44 @@ pub struct RegisterHook<'info> {
     pub token_program: Program<'info, Token2022>,
 }
 
+#[derive(Accounts)]
+pub struct UpdateRaydiumProgramId<'info> {
+    #[account(
+        mut,
+        has_one = authority @ ErrorCode::Unauthorized // Ensure authority matches the one in GlobalState
+    )]
+    pub global_state: Account<'info, GlobalState>, // Global state account
+    pub authority: Signer<'info>, // Admin authority
+}
+
 
 fn get_token_balance(token_account: &AccountInfo) -> Result<u64> {
     // Use the spl_token::state::Account to access the token balance
     let data = spl_token::state::Account::unpack(&token_account.data.borrow()).map_err(|_| ErrorCode::TokenAccountCreationFailed)?;
     Ok(data.amount)
 }
-
-/// Helper function to detect if it's a Raydium or AMM trade
-fn is_raydium_transaction(source_account: &AccountInfo) -> bool {
-    // Check if the source account is from Raydium's program ID or AMM
-    const RAYDIUM_PROGRAM_ID: &str = "AMM_123_Program_ID"; // Replace this with actual Raydium's Program ID
-    source_account.owner.to_string() == RAYDIUM_PROGRAM_ID
-}
-
+ 
 pub struct RaydiumTransactionHelper;
 
 impl RaydiumTransactionHelper {
-    /// Returns true if the source account is from Raydium's program
+    /// Checks if the source account belongs to Raydium's Program
     pub fn is_raydium_transaction(source_account: &AccountInfo, raydium_program_id: Pubkey) -> bool {
-        return source_account.owner == &raydium_program_id;
+        // Check if the source account's owner matches Raydium's program ID
+        if source_account.owner == &raydium_program_id {
+            msg!("Raydium transaction detected for source account: {:?}", source_account.key);
+            return true;
+        }
+
+        // Log for non-Raydium transactions (optional, for debugging)
+        msg!(
+            "Source account {:?} is not owned by Raydium. Owner: {:?}",
+            source_account.key,
+            source_account.owner
+        );
+
+        return false;
     }
 }
-
-// fn trigger_auto_sell(ctx: &Context<UnlockTokens>) -> Result<()> {
-//     let global_state = &ctx.accounts.global_state;
-//     let project_wallet = &ctx.accounts.project_wallet;
-
-//     // Fetch Project Wallet balance
-//     let project_wallet_balance = get_token_balance(ctx.accounts.project_wallet.to_account_info())?;
-//     if project_wallet_balance == 0 {
-//         return Err(ErrorCode::InsufficientFundsForAutoSell.into());
-//     }
-
-//     // Calculate 25% of the Project Wallet balance for auto-sell
-//     let sell_amount = project_wallet_balance
-//         .checked_div(4) // 25% of tokens
-//         .ok_or(ErrorCode::ArithmeticOverflow)?;
-
-//     // Ensure the sell amount is greater than 0
-//     if sell_amount == 0 {
-//         return Err(ErrorCode::InsufficientSellAmount.into());
-//     }
-
-//     msg!("Initiating auto-sell of {} tokens for liquidity...", sell_amount);
-
-//     // --- Add Raydium/Orca Swap CPI Logic Here ---
-//     // For example: You'd interact with Raydium's AMM program to perform the token swap.
-//     // Example: Transfer tokens from Project Wallet and swap via Raydium.
-//     // (Details provided earlier on how to use CPI with Raydium's AMM).
-
-//     // Alternatively, you can emit an event for off-chain bots to execute Raydium swap:
-//     emit!(AutoSellTriggered {
-//         sell_amount,
-//         wallet: project_wallet.key(), // Project Wallet performing the transaction
-//         destination: ctx.accounts.liquidity_wallet.key(), // Liquidity destination wallet
-//     });
-
-//     msg!(
-//         "Auto-sell triggered: {} tokens sold from {:?}",
-//         sell_amount,
-//         project_wallet.key()
-//     );
-
-//     Ok(())
-// }
 
 // Error codes
 #[error_code]
@@ -870,10 +859,6 @@ pub enum ErrorCode {
     Unauthorized,
     #[msg("Invalid burn wallet account")]
     InvalidBurnWallet,
-    #[msg("Insufficient funds for auto-sell")]
-    InsufficientFundsForAutoSell,
-    #[msg("Insufficient sell amount for auto-sell")]
-    InsufficientSellAmount,
     #[msg("Invalid marketing wallet account")]
     InvalidMarketingWallet,
     #[msg("Invalid project wallet account")]
@@ -897,12 +882,6 @@ pub struct MarketCapUpdated {
     pub market_cap: u64,      // The new market cap value
 }
 
-#[event]
-pub struct AutoSellTriggered {
-    pub sell_amount: u64,              // Number of tokens sold
-    pub wallet: Pubkey,                // Project Wallet public key
-    pub destination: Pubkey,           // Liquidity destination (e.g., USDC wallet)
-}
 
 #[event]
 pub struct MilestoneProcessed {
