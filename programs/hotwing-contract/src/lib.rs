@@ -617,6 +617,7 @@ pub fn register_transfer_hook(ctx: Context<RegisterHook>) -> Result<()> {
 #[derive(Default)] // Add default implementation for easier initialization
 pub struct GlobalState {
     pub authority: Pubkey,                        // Admin authority (32 bytes)
+    ///CHECK: Token mint account
     pub token_mint: Pubkey,                       // Token mint address (32 bytes)
     /// CHECK: This is a standard wallet account, and the program will verify its usage.
     pub burn_wallet: Pubkey,           
@@ -693,7 +694,7 @@ pub struct Milestone {
 pub struct InitializeProgram<'info> {
     #[account(init, payer = authority, space = 8 + GlobalState::LEN)]
     pub global_state: Account<'info, GlobalState>,
-
+    ///CHECK: Token mint account
     pub token_mint: Account<'info, Mint>, // Correct type for SPL Token Mint
     /// CHECK: This is a standard wallet account, and the program will verify its usage
     pub burn_wallet: AccountInfo<'info>, // Standard wallet (not SPL Token Account)
@@ -789,6 +790,7 @@ pub struct RegisterUserOnTransfer<'info> {
 pub struct RegisterHook<'info> {
     /// The Token-2022 mint account (target for the transfer hook update).
     #[account(mut)]
+    ///CHECK: Token mint account
     pub token_mint: AccountInfo<'info>,
     /// The authority on the Token-2022 mint (must sign the CPI).
     #[account(signer)]
