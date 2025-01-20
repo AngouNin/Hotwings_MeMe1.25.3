@@ -614,8 +614,7 @@ pub struct GlobalState {
     pub user_count: u64,                          // Total user count (8 bytes)
     pub three_month_unlock_date: i64,             // Unlock date (3 months) (8 bytes)
     pub exempted_wallets: Vec<Pubkey>,            // List of exempt wallets (dynamic size - limit required!)
-    pub unlock_complete: bool,                    // Full unlock flag (1 byte)
-    pub auto_sell_triggered: bool,
+    pub unlock_complete: bool,                    // Full unlock flag (1 byte) 
     pub raydium_program_id: Pubkey,               // Program ID of Raydium AMM (32 bytes)
 }
 
@@ -785,14 +784,7 @@ fn get_token_balance(token_account: &AccountInfo) -> Result<u64> {
     let data = spl_token::state::Account::unpack(&token_account.data.borrow()).map_err(|_| ErrorCode::TokenAccountCreationFailed)?;
     Ok(data.amount)
 }
-
-/// Helper function to detect if it's a Raydium or AMM trade
-fn is_raydium_transaction(source_account: &AccountInfo) -> bool {
-    // Check if the source account is from Raydium's program ID or AMM
-    const RAYDIUM_PROGRAM_ID: &str = "AMM_123_Program_ID"; // Replace this with actual Raydium's Program ID
-    source_account.owner.to_string() == RAYDIUM_PROGRAM_ID
-}
-
+ 
 pub struct RaydiumTransactionHelper;
 
 impl RaydiumTransactionHelper {
@@ -801,49 +793,6 @@ impl RaydiumTransactionHelper {
         return source_account.owner == &raydium_program_id;
     }
 }
-
-// fn trigger_auto_sell(ctx: &Context<UnlockTokens>) -> Result<()> {
-//     let global_state = &ctx.accounts.global_state;
-//     let project_wallet = &ctx.accounts.project_wallet;
-
-//     // Fetch Project Wallet balance
-//     let project_wallet_balance = get_token_balance(ctx.accounts.project_wallet.to_account_info())?;
-//     if project_wallet_balance == 0 {
-//         return Err(ErrorCode::InsufficientFundsForAutoSell.into());
-//     }
-
-//     // Calculate 25% of the Project Wallet balance for auto-sell
-//     let sell_amount = project_wallet_balance
-//         .checked_div(4) // 25% of tokens
-//         .ok_or(ErrorCode::ArithmeticOverflow)?;
-
-//     // Ensure the sell amount is greater than 0
-//     if sell_amount == 0 {
-//         return Err(ErrorCode::InsufficientSellAmount.into());
-//     }
-
-//     msg!("Initiating auto-sell of {} tokens for liquidity...", sell_amount);
-
-//     // --- Add Raydium/Orca Swap CPI Logic Here ---
-//     // For example: You'd interact with Raydium's AMM program to perform the token swap.
-//     // Example: Transfer tokens from Project Wallet and swap via Raydium.
-//     // (Details provided earlier on how to use CPI with Raydium's AMM).
-
-//     // Alternatively, you can emit an event for off-chain bots to execute Raydium swap:
-//     emit!(AutoSellTriggered {
-//         sell_amount,
-//         wallet: project_wallet.key(), // Project Wallet performing the transaction
-//         destination: ctx.accounts.liquidity_wallet.key(), // Liquidity destination wallet
-//     });
-
-//     msg!(
-//         "Auto-sell triggered: {} tokens sold from {:?}",
-//         sell_amount,
-//         project_wallet.key()
-//     );
-
-//     Ok(())
-// }
 
 // Error codes
 #[error_code]
@@ -897,12 +846,6 @@ pub struct MarketCapUpdated {
     pub market_cap: u64,      // The new market cap value
 }
 
-#[event]
-pub struct AutoSellTriggered {
-    pub sell_amount: u64,              // Number of tokens sold
-    pub wallet: Pubkey,                // Project Wallet public key
-    pub destination: Pubkey,           // Liquidity destination (e.g., USDC wallet)
-}
 
 #[event]
 pub struct MilestoneProcessed {
