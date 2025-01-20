@@ -1086,13 +1086,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "hotwing-contract"
+name = "hotwing_contract"
 version = "0.1.0"
 dependencies = [
  "anchor-lang",
  "anchor-spl",
  "solana-program",
  "spl-token 3.5.0",
+ "spl-token-2022",
 ]
 
 [[package]]
