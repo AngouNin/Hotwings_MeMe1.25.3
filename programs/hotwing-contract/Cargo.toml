@@ -12,6 +12,12 @@ custom-panic = []
 no-idl = []
 no-log-ix-name = []
 
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[build]
+rustflags = ["-Clinker=lld"]
+
 [dependencies]
 anchor-lang = { version = "0.30.1", features = ["init-if-needed"] }     # Anchor framework core library 
 anchor-spl = "0.30.1"      # Anchor framework SPL (Solana Program Library) integration 
