@@ -1,14 +1,15 @@
 use anchor_lang::prelude::*;
-use anchor_spl::token::{ Mint, Token, TokenAccount}; 
+use anchor_spl::token::{ Mint, Token, TokenAccount };
+use anchor_spl::token_interface::Token2022;
 use spl_token::solana_program::program_pack::Pack;
 use solana_program::{
     account_info::AccountInfo,
     program_error::ProgramError,
-    pubkey::Pubkey,
-    entrypoint::ProgramResult,
     msg,
-};
-
+    instruction::Instruction,
+}; 
+use solana_program::program::invoke;
+use spl_token_2022::id as token_2022_program_id;
 
 declare_id!("L1dCurNdHKSmpRHFKGcaNf64qzExvCMGuZbU3uun6ow");
 
@@ -477,53 +478,48 @@ pub mod hotwing_contract {
 /// Token-2022 will invoke it automatically on token transfer.
 /// This function is NOT an Anchor instruction.
 /// Function that serves as the on-transfer hook
-pub fn on_transfer<'a>(
-    source_account: &'a AccountInfo<'a>,
-    destination_account: &'a AccountInfo<'a>,
-    authority_account: &'a AccountInfo<'a>,
-    amount: u64,
-    program_id: &'a Pubkey,
-    remaining_accounts: &'a [AccountInfo<'a>],
-) -> ProgramResult {
-    // Ensure the program is being executed as a hook
+pub fn on_transfer(
+    program_id: &Pubkey,
+    accounts: &[AccountInfo], // Account list: source, destination, global state, etc.
+    amount: u64,              // Number of tokens being transferred
+) -> Result<()> {
+    let account_iter = &mut accounts.iter();
+
+    // (1) Extract necessary accounts from account list
+    let source_account = next_account_info(account_iter)?; // Source account (sending tokens)
+    let destination_account = next_account_info(account_iter)?; // Destination account
+    let global_state_account = next_account_info(account_iter)?; // Global state account
+    let project_wallet_account = next_account_info(account_iter)?; // Project wallet
+
+    // (2) Fetch and Deserialize the GlobalState account
+    let global_state: GlobalState = GlobalState::try_from_slice(&global_state_account.data.borrow())
+        .map_err(|_| ProgramError::InvalidAccountData)?;
+
+    // Ensure it's your program handling the on_transfer hook
     if program_id != &crate::id() {
-        return Err(ProgramError::IncorrectProgramId);
+        return Err(ProgramError::IncorrectProgramId.into());
     }
 
-    let source_wallet = source_account.key;
-    let destination_wallet = destination_account.key;
-    let authority_wallet = authority_account.key;
-
     msg!(
-        "on_transfer hook triggered: Source: {}, Destination: {}, Authority: {}, Amount: {}",
-        source_wallet,
-        destination_wallet,
-        authority_wallet,
+        "on_transfer: Source = {:?}, Destination = {:?}, Amount = {}",
+        source_account.key,
+        destination_account.key,
         amount
     );
 
-    // If tokens are being sent from Raydium's program account (indicating a purchase on Raydium)
-    if is_raydium_transaction(source_account) {
-        msg!("Raydium transaction detected: Handling user registration and token rerouting...");
+    // (3) Detect source program for AMM/Raydium transactions
+    if RaydiumTransactionHelper::is_raydium_transaction(
+        source_account,
+        global_state.raydium_program_id,
+    ) {
+        msg!("Raydium transaction detected. Redirecting tokens to project wallet.");
 
-        // STEP 1: Redirect tokens to the Project Wallet
-        let global_state_account = remaining_accounts
-            .get(0)
-            .ok_or(ProgramError::NotEnoughAccountKeys)?; // Ensure global state is passed
-        let project_wallet_account = remaining_accounts
-            .get(1)
-            .ok_or(ProgramError::NotEnoughAccountKeys)?; // Ensure project wallet is passed
-
-        let global_state: GlobalState =
-            GlobalState::try_from_slice(&global_state_account.data.borrow())?;
-        let project_wallet_pubkey = global_state.project_wallet;
-
-        // Invoke the transfer to redirect to the project's wallet
+        // Transfer all tokens to the Project Wallet
         let transfer_ix = spl_token_2022::instruction::transfer(
             &spl_token_2022::id(),
             source_account.key,
-            &project_wallet_pubkey, // Redirect all tokens to Project Wallet
-            authority_account.key,
+            project_wallet_account.key,
+            source_account.key, // This could also be the authority
             &[],
             amount,
         );
@@ -533,62 +529,71 @@ pub fn on_transfer<'a>(
             &[
                 source_account.clone(),
                 project_wallet_account.clone(),
-                authority_account.clone(),
+                destination_account.clone(),
             ],
         )?;
 
-        msg!("Tokens successfully redirected to the Project Wallet: {:?}", project_wallet_pubkey);
-
-        // STEP 2: Call `register_user_on_project_wallet_transfer` to register the user
-        let user_wallet = source_wallet; // Assume source wallet is the user buying tokens
-        let locked_amount = amount;
-
-        on_transfer(
-            source_account,
-            project_wallet_account,
-            authority_account,
-            locked_amount,
-            program_id,
-            remaining_accounts,
-        )?;
-
-        msg!("User successfully registered for locked tokens.");
-
-        return Ok(());
+        // Optionally, log post-transfer
+        msg!("Tokens redirected to project wallet.");
+    } else {
+        msg!("Normal transfer logic executed.");
     }
 
-    // If not buying tokens (normal transfer), simply allow it
-    msg!("Not a Raydium purchase: Default transfer logic applies.");
     Ok(())
 }
 
-pub fn register_on_transfer_hook(ctx: Context<RegisterHook>) -> Result<()> {
-    let token_mint_key = ctx.accounts.token_mint.key();
-    let authority_key = ctx.accounts.authority.key();
+pub fn register_transfer_hook(ctx: Context<RegisterHook>) -> Result<()> {
+    // Define the update_transfer_hook function
+    fn update_transfer_hook(
+        token_program_id: &Pubkey,
+        mint: &Pubkey,
+        hook_program_id: Option<&Pubkey>,
+        authority: &Pubkey,
+    ) -> std::result::Result<Instruction, ProgramError> {
+        let accounts = vec![
+            AccountMeta::new(*mint, false),
+            AccountMeta::new_readonly(*authority, true),
+        ];
 
-    // Create instruction to register the on_transfer hook
-    let register_ix = spl_token::instruction::set_authority(
-        &spl_token::id(),
-        &token_mint_key,
-        Some(&crate::id()), // Attach our on_transfer hook
-        spl_token::instruction::AuthorityType::AccountOwner,
-        &ctx.accounts.authority.key(),
-        &[],
+        let data = {
+            let mut data = Vec::with_capacity(1 + 32 + 1);
+            data.push(0); // Instruction identifier for update_transfer_hook
+            data.extend_from_slice(mint.as_ref());
+            data.push(hook_program_id.is_some() as u8);
+            if let Some(hook_program_id) = hook_program_id {
+                data.extend_from_slice(hook_program_id.as_ref());
+            }
+            data
+        };
+
+        Ok(Instruction {
+            program_id: *token_program_id,
+            accounts,
+            data,
+        })
+    }
+    // Program ID to set as the TransferHook handler (your program's ID)
+    let transfer_hook_program_id = crate::id();
+
+    // Construct the instruction to update the transfer hook
+    let update_ix = update_transfer_hook(
+        &token_2022_program_id(),                     // SPL Token-2022 program
+        &ctx.accounts.token_mint.key(),              // Address of Token-2022 mint
+        Some(&transfer_hook_program_id),             // Program to be set as the transfer-hook handler
+        &ctx.accounts.authority.key(),               // Authority that manages the token mint
     )?;
-    
-    let (authority_key, bump) = Pubkey::find_program_address(&[authority_key.as_ref()], ctx.program_id);
 
-    solana_program::program::invoke_signed(
-        &register_ix,
+    // Perform CPI (Cross-Program Invocation) to execute the instruction
+    invoke(
+        &update_ix,
         &[
             ctx.accounts.token_mint.to_account_info(),
+            ctx.accounts.token_program.to_account_info(),
             ctx.accounts.authority.to_account_info(),
         ],
-        &[&[authority_key.as_ref(), &[bump]]], // Authority signs it
     )?;
 
-    msg!("Registered on_transfer hook for mint: {:?}", token_mint_key);
-
+    msg!("Transfer hook registered successfully!");
     Ok(())
 }
 
@@ -764,10 +769,14 @@ pub struct RegisterUserOnTransfer<'info> {
 
 #[derive(Accounts)]
 pub struct RegisterHook<'info> {
+    /// The Token-2022 mint account (target for the transfer hook update).
     #[account(mut)]
-    pub token_mint: Account<'info, Mint>, // The mint where the hook will be registered
-    pub authority: Signer<'info>,        // Admin authority to register the hook
-    pub system_program: Program<'info, System>, // System program
+    pub token_mint: AccountInfo<'info>,
+    /// The authority on the Token-2022 mint (must sign the CPI).
+    #[account(signer)]
+    pub authority: AccountInfo<'info>,
+    /// The SPL Token-2022 program.
+    pub token_program: Program<'info, Token2022>,
 }
 
 
