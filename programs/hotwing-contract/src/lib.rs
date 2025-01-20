@@ -24,7 +24,6 @@ pub const MAX_EXEMPTED_WALLETS: usize = 20; // Maximum exempted wallets
 #[program]
 pub mod hotwing_contract {
     use anchor_spl::{associated_token::{get_associated_token_address, spl_associated_token_account}, token};
-
     use super::*;
 
     /// Initialize the program with milestones and setup global state
@@ -71,8 +70,6 @@ pub mod hotwing_contract {
 
         Ok(())
     }
-
-    
 
     /// Registers multiple users and creates their token accounts (if missing)
     pub fn register_users(ctx: Context<RegisterUsers>, entries: Vec<UserEntry>) -> Result<()> {
@@ -741,8 +738,9 @@ pub struct ManageExemptWallet<'info> {
 #[derive(Accounts)]
 pub struct UpdateMarketCap<'info> {
     #[account(
-        mut,                                      // Global state is being updated
-        has_one = authority                       // Ensure authority matches the stored authority in global state
+        mut,
+        has_one = authority, // Verify that the provided `Signer` matches the stored `authority`
+        constraint = authority.key() == global_state.authority @ ErrorCode::Unauthorized
     )]
     pub global_state: Account<'info, GlobalState>, // Global state account
     pub authority: Signer<'info>,                 // Signer (admin authority)
