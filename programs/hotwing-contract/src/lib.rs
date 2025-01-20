@@ -616,6 +616,7 @@ pub fn register_transfer_hook(ctx: Context<RegisterHook>) -> Result<()> {
 #[account]
 #[derive(Default)] // Add default implementation for easier initialization
 pub struct GlobalState {
+    ///CHECK: Admin authority
     pub authority: Pubkey,                        // Admin authority (32 bytes)
     ///CHECK: Token mint account
     pub token_mint: Pubkey,                       // Token mint address (32 bytes)
@@ -704,6 +705,7 @@ pub struct InitializeProgram<'info> {
     pub project_wallet: AccountInfo<'info>, // Standard wallet
 
     #[account(mut)]
+    ///CHECK: This is a standard wallet account, and the program will verify its usage
     pub authority: Signer<'info>, // Admin authority
 
     pub system_program: Program<'info, System>, // System Program
@@ -714,6 +716,7 @@ pub struct RegisterUsers<'info> {
     #[account(mut)]
     pub global_state: Account<'info, GlobalState>, // Global state account
     #[account(mut)]
+    ///CHECK: This is a standard wallet account, and the program will verify its usage
     pub authority: Signer<'info>, // Authority (payer for creating the user state PDA)
     pub rent: Sysvar<'info, Rent>, // Rent system variable
     pub system_program: Program<'info, System>, // System program account
@@ -753,7 +756,7 @@ pub struct ManageExemptWallet<'info> {
         constraint = authority.key() == global_state.authority @ ErrorCode::Unauthorized
     )]
     pub global_state: Account<'info, GlobalState>, // Global configuration
-
+    ///CHECK: This is a standard wallet account, and the program will verify its usage
     pub authority: Signer<'info>, // Admin authority to sign the transaction
 }
 
@@ -765,6 +768,7 @@ pub struct UpdateMarketCap<'info> {
         constraint = authority.key() == global_state.authority @ ErrorCode::Unauthorized
     )]
     pub global_state: Account<'info, GlobalState>, // Global state account
+    ///CHECK: This is a standard wallet account, and the program will verify its usage
     pub authority: Signer<'info>,                 // Signer (admin authority)
 }
 
@@ -775,6 +779,7 @@ pub struct RegisterUserOnTransfer<'info> {
     #[account(mut)]
     pub project_wallet: Account<'info, TokenAccount>, // Project wallet receiving locked tokens
     #[account(mut)]
+    ///CHECK: This is a standard wallet account, and the program will verify its usage
     pub authority: Signer<'info>, // The signer who calls this transaction (payer for accounts)
     pub rent: Sysvar<'info, Rent>, // Rent sysvar
     pub system_program: Program<'info, System>,  // System program (for creating PDAs)
@@ -794,6 +799,7 @@ pub struct RegisterHook<'info> {
     pub token_mint: AccountInfo<'info>,
     /// The authority on the Token-2022 mint (must sign the CPI).
     #[account(signer)]
+    ///CHECK: The authority who triggered the update
     pub authority: AccountInfo<'info>,
     /// The SPL Token-2022 program.
     pub token_program: Program<'info, Token2022>,
@@ -806,6 +812,7 @@ pub struct UpdateRaydiumProgramId<'info> {
         has_one = authority @ ErrorCode::Unauthorized // Ensure authority matches the one in GlobalState
     )]
     pub global_state: Account<'info, GlobalState>, // Global state account
+    ///CHECK: This is a standard wallet account, and the program will verify its usage
     pub authority: Signer<'info>, // Admin authority
 }
 
@@ -882,6 +889,7 @@ pub struct UserRegistered {
 
 #[event]
 pub struct MarketCapUpdated {
+    ///CHECK: The authority who triggered the update
     pub authority: Pubkey,    // Public key of the authority who triggered the update
     pub market_cap: u64,      // The new market cap value
 }
