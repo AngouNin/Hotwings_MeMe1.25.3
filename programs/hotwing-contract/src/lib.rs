@@ -18,7 +18,7 @@ const THREE_MONTHS_SECONDS: i64 = 60 * 60 * 24 * 90;
 pub const MAX_MILESTONES: usize = 8;
 pub const MAX_USERS: usize = 1000;
 pub const MAX_HOLD_AMOUNT: u64 = 50000000; // Anti-whale restriction:
-pub const MAX_EXEMPTED_WALLETS: usize = 128; // Maximum exempted wallets
+pub const MAX_EXEMPTED_WALLETS: usize = 20; // Maximum exempted wallets
 
 /// Program module
 #[program]
@@ -48,8 +48,7 @@ pub mod hotwing_contract {
         global_state.token_mint = ctx.accounts.token_mint.key(); 
         global_state.burn_wallet = ctx.accounts.burn_wallet.key();
         global_state.marketing_wallet = ctx.accounts.marketing_wallet.key();
-        global_state.project_wallet = ctx.accounts.project_wallet.key();
-        // global_state.token_price_oracle = ctx.accounts.token_price_oracle.key();
+        global_state.project_wallet = ctx.accounts.project_wallet.key(); 
         global_state.current_market_cap = 0;
         global_state.current_milestone = 0;
         global_state.user_count = 0;
@@ -819,10 +818,6 @@ pub enum ErrorCode {
     Unauthorized,
     #[msg("Invalid burn wallet account")]
     InvalidBurnWallet,
-    #[msg("Insufficient funds for auto-sell")]
-    InsufficientFundsForAutoSell,
-    #[msg("Insufficient sell amount for auto-sell")]
-    InsufficientSellAmount,
     #[msg("Invalid marketing wallet account")]
     InvalidMarketingWallet,
     #[msg("Invalid project wallet account")]
