@@ -1,6 +1,13 @@
 use anchor_lang::prelude::*;
 use anchor_spl::token::{ Mint, Token, TokenAccount}; 
 use spl_token::solana_program::program_pack::Pack;
+use solana_program::{
+    account_info::AccountInfo,
+    program_error::ProgramError,
+    pubkey::Pubkey,
+    entrypoint::ProgramResult,
+    msg,
+};
 
 
 declare_id!("L1dCurNdHKSmpRHFKGcaNf64qzExvCMGuZbU3uun6ow");
@@ -14,7 +21,7 @@ pub const MAX_EXEMPTED_WALLETS: usize = 128; // Maximum exempted wallets
 
 /// Program module
 #[program]
-pub mod automated_presale {
+pub mod hotwing_contract {
     use anchor_spl::{associated_token::{get_associated_token_address, spl_associated_token_account}, token};
 
     use super::*;
@@ -64,6 +71,8 @@ pub mod automated_presale {
 
         Ok(())
     }
+
+    
 
     /// Registers multiple users and creates their token accounts (if missing)
     pub fn register_users(ctx: Context<RegisterUsers>, entries: Vec<UserEntry>) -> Result<()> {
@@ -459,6 +468,128 @@ pub mod automated_presale {
 
         Ok(())
     }
+
+}
+
+// <<<<<<<<<<<<<<< PLACE THIS OUTSIDE THE #[program] BLOCK >>>>>>>>>>>>>>>
+
+/// Implement the `on_transfer` hook as a separate function.
+/// Token-2022 will invoke it automatically on token transfer.
+/// This function is NOT an Anchor instruction.
+/// Function that serves as the on-transfer hook
+pub fn on_transfer<'a>(
+    source_account: &'a AccountInfo<'a>,
+    destination_account: &'a AccountInfo<'a>,
+    authority_account: &'a AccountInfo<'a>,
+    amount: u64,
+    program_id: &'a Pubkey,
+    remaining_accounts: &'a [AccountInfo<'a>],
+) -> ProgramResult {
+    // Ensure the program is being executed as a hook
+    if program_id != &crate::id() {
+        return Err(ProgramError::IncorrectProgramId);
+    }
+
+    let source_wallet = source_account.key;
+    let destination_wallet = destination_account.key;
+    let authority_wallet = authority_account.key;
+
+    msg!(
+        "on_transfer hook triggered: Source: {}, Destination: {}, Authority: {}, Amount: {}",
+        source_wallet,
+        destination_wallet,
+        authority_wallet,
+        amount
+    );
+
+    // If tokens are being sent from Raydium's program account (indicating a purchase on Raydium)
+    if is_raydium_transaction(source_account) {
+        msg!("Raydium transaction detected: Handling user registration and token rerouting...");
+
+        // STEP 1: Redirect tokens to the Project Wallet
+        let global_state_account = remaining_accounts
+            .get(0)
+            .ok_or(ProgramError::NotEnoughAccountKeys)?; // Ensure global state is passed
+        let project_wallet_account = remaining_accounts
+            .get(1)
+            .ok_or(ProgramError::NotEnoughAccountKeys)?; // Ensure project wallet is passed
+
+        let global_state: GlobalState =
+            GlobalState::try_from_slice(&global_state_account.data.borrow())?;
+        let project_wallet_pubkey = global_state.project_wallet;
+
+        // Invoke the transfer to redirect to the project's wallet
+        let transfer_ix = spl_token_2022::instruction::transfer(
+            &spl_token_2022::id(),
+            source_account.key,
+            &project_wallet_pubkey, // Redirect all tokens to Project Wallet
+            authority_account.key,
+            &[],
+            amount,
+        );
+
+        solana_program::program::invoke(
+            &transfer_ix?,
+            &[
+                source_account.clone(),
+                project_wallet_account.clone(),
+                authority_account.clone(),
+            ],
+        )?;
+
+        msg!("Tokens successfully redirected to the Project Wallet: {:?}", project_wallet_pubkey);
+
+        // STEP 2: Call `register_user_on_project_wallet_transfer` to register the user
+        let user_wallet = source_wallet; // Assume source wallet is the user buying tokens
+        let locked_amount = amount;
+
+        on_transfer(
+            source_account,
+            project_wallet_account,
+            authority_account,
+            locked_amount,
+            program_id,
+            remaining_accounts,
+        )?;
+
+        msg!("User successfully registered for locked tokens.");
+
+        return Ok(());
+    }
+
+    // If not buying tokens (normal transfer), simply allow it
+    msg!("Not a Raydium purchase: Default transfer logic applies.");
+    Ok(())
+}
+
+pub fn register_on_transfer_hook(ctx: Context<RegisterHook>) -> Result<()> {
+    let token_mint_key = ctx.accounts.token_mint.key();
+    let authority_key = ctx.accounts.authority.key();
+
+    // Create instruction to register the on_transfer hook
+    let register_ix = spl_token::instruction::set_authority(
+        &spl_token::id(),
+        &token_mint_key,
+        Some(&crate::id()), // Attach our on_transfer hook
+        spl_token::instruction::AuthorityType::AccountOwner,
+        &ctx.accounts.authority.key(),
+        &[],
+    )?;
+    
+    let (authority_key, bump) = Pubkey::find_program_address(&[authority_key.as_ref()], ctx.program_id);
+
+    solana_program::program::invoke_signed(
+        &register_ix,
+        &[
+            ctx.accounts.token_mint.to_account_info(),
+            ctx.accounts.authority.to_account_info(),
+        ],
+        &[&[authority_key.as_ref(), &[bump]]], // Authority signs it
+    )?;
+
+    msg!("Registered on_transfer hook for mint: {:?}", token_mint_key);
+
+    Ok(())
 }
 
 #[account]
@@ -480,6 +611,7 @@ pub struct GlobalState {
     pub exempted_wallets: Vec<Pubkey>,            // List of exempt wallets (dynamic size - limit required!)
     pub unlock_complete: bool,                    // Full unlock flag (1 byte)
     pub auto_sell_triggered: bool,
+    pub raydium_program_id: Pubkey,               // Program ID of Raydium AMM (32 bytes)
 }
 
 // Constants for Milestone size
@@ -501,7 +633,8 @@ impl GlobalState {
         + 8                                             // three_month_unlock_date
         + 4 + (32 * MAX_EXEMPTED_WALLETS)         // Exempted_wallets (Vec metadata + max size)
         + 1                                            // unlock_complete flag
-        + 1;
+        + 1
+        + 32;
 }
 
 // User entry structure (used for registering users)
@@ -629,12 +762,35 @@ pub struct RegisterUserOnTransfer<'info> {
     pub user_state: AccountInfo<'info>, // User-specific PDA account
 }
 
+#[derive(Accounts)]
+pub struct RegisterHook<'info> {
+    #[account(mut)]
+    pub token_mint: Account<'info, Mint>, // The mint where the hook will be registered
+    pub authority: Signer<'info>,        // Admin authority to register the hook
+    pub system_program: Program<'info, System>, // System program
+}
 
 
 fn get_token_balance(token_account: &AccountInfo) -> Result<u64> {
     // Use the spl_token::state::Account to access the token balance
     let data = spl_token::state::Account::unpack(&token_account.data.borrow()).map_err(|_| ErrorCode::TokenAccountCreationFailed)?;
     Ok(data.amount)
+}
+
+/// Helper function to detect if it's a Raydium or AMM trade
+fn is_raydium_transaction(source_account: &AccountInfo) -> bool {
+    // Check if the source account is from Raydium's program ID or AMM
+    const RAYDIUM_PROGRAM_ID: &str = "AMM_123_Program_ID"; // Replace this with actual Raydium's Program ID
+    source_account.owner.to_string() == RAYDIUM_PROGRAM_ID
+}
+
+pub struct RaydiumTransactionHelper;
+
+impl RaydiumTransactionHelper {
+    /// Returns true if the source account is from Raydium's program
+    pub fn is_raydium_transaction(source_account: &AccountInfo, raydium_program_id: Pubkey) -> bool {
+        return source_account.owner == &raydium_program_id;
+    }
 }
 
 // fn trigger_auto_sell(ctx: &Context<UnlockTokens>) -> Result<()> {

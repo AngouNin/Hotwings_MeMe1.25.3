@@ -1,5 +1,5 @@
 [package]
-name = "hotwing-contract"  # Replace this with your program name
+name = "hotwing_contract"  # Replace this with your program name
 version = "0.1.0"
 edition = "2021"
 
@@ -17,3 +17,4 @@ anchor-lang = { version = "0.30.1", features = ["init-if-needed"] }     # Anchor
 anchor-spl = "0.30.1"      # Anchor framework SPL (Solana Program Library) integration 
 solana-program = "=1.18.26"
 spl-token = "=3.5.0"
+spl-token-2022 = "=3.0.5"
