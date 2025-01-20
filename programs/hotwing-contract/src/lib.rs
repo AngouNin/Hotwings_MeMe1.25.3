@@ -26,6 +26,7 @@ pub mod automated_presale {
         let burn_wallet_account = &ctx.accounts.burn_wallet;
         if !burn_wallet_account.is_writable {
             return Err(ErrorCode::InvalidBurnWallet.into());
+            
         }
         let marketing_wallet_account = &ctx.accounts.marketing_wallet;
         if !marketing_wallet_account.is_writable {
@@ -169,163 +170,170 @@ pub mod automated_presale {
     }
 
     /// Unlocks tokens automatically when milestone conditions are met
-    pub fn process_milestones<'a, 'b, 'c, 'd, 'info>(ctx: Context<'a, 'b, 'c, 'd, UnlockTokens<'info>>, market_cap: u64) -> Result<()>
-    where 'c: 'info, 'd: 'info, 'info: 'd {
+    pub fn process_milestones<'info>(
+        ctx: Context<'_, '_, '_, 'info, UnlockTokens<'info>>,
+        market_cap: u64,
+    ) -> Result<()> {
         let global_state = &mut ctx.accounts.global_state;
     
-        // Update current market cap
+        // Update global market cap
         global_state.current_market_cap = market_cap;
-
-        // Check if the three-month unlock date has passed
+    
+        // Check if three-month full unlocking conditions are met
         let current_timestamp = Clock::get()?.unix_timestamp;
-
-        // Ensure full unlock bypasses anti-whale restrictions
-        if current_timestamp >= global_state.three_month_unlock_date || global_state.current_market_cap >= 2_500_000 {
-            msg!("Unlock conditions met: Anti-whale restrictions lifted. Full unlocking allowed.");
+        if current_timestamp >= global_state.three_month_unlock_date || market_cap >= 2_500_000 {
+            msg!("Full unlocking allowed: Three months passed or max market cap reached.");
             global_state.unlock_complete = true;
-
-            // Trigger auto-sell logic if not already triggered
-            if !global_state.auto_sell_triggered {
-                msg!("Triggering auto-sell mechanism...");
-                // trigger_auto_sell(&ctx)?; // Call the auto-sell function
-                global_state.auto_sell_triggered = true; // Mark auto-sell as completed
-            } else {
-                msg!("Auto-sell already triggered. Skipping...");
-            }
-        } else {
-            msg!("Unlock conditions not met: Three-month lock period still active.
-                All users are subject to anti-whale restrictions.");
-            global_state.unlock_complete = false;
         }
     
-        let mut current_milestone_index = global_state.current_milestone as usize;
-        // Iterate through milestones
-        let mut milestone = &global_state.milestones[current_milestone_index];
-
-        if current_milestone_index < MAX_MILESTONES {
-
-            // If the current market cap is below the milestone threshold, stop processing
-            if market_cap < milestone.market_cap {
-                Err(ErrorCode::MiletoneNotReached)?;
-            } else {
-                while (current_milestone_index < MAX_MILESTONES)
-                    && (market_cap >= global_state.milestones[current_milestone_index].market_cap)
-                {
-                    current_milestone_index += 1;
-                }
-                
-            }
-
-            // Update the current milestone index
-            global_state.current_milestone = current_milestone_index as u8;
-            milestone = &global_state.milestones[current_milestone_index];
+        // Iterate milestones to find the applicable range
+        let mut milestone_idx = global_state.current_milestone as usize;
+        while milestone_idx < MAX_MILESTONES
+            && market_cap >= global_state.milestones[milestone_idx].market_cap
+        {
+            milestone_idx += 1;
+        }
     
-            // Log milestone processing
-            msg!(
-                "Processing milestone {}: Unlock {}%",
-                global_state.current_milestone,
-                milestone.unlock_percent
-            );
-
-            // For each user, process token unlocking based on the milestone
-            for user_index in 0..global_state.user_count {
-                // Derive the user PDA
-                let (user_pda, _bump) = Pubkey::find_program_address(
-                    &[b"user_state", &user_index.to_le_bytes()],
-                    ctx.program_id,
-                );
-
-                if ctx.remaining_accounts.len() < global_state.user_count as usize * 2 {
-                    // Each user must have a PDA and an ATA in remaining accounts
-                    return Err(ErrorCode::AccountNotEnough.into());
-                }
+        if milestone_idx == global_state.current_milestone as usize {
+            return Err(ErrorCode::MiletoneNotReached.into());
+        }
     
-                // Fetch user's state account from the remaining accounts provided
-                let user_account_info = ctx
-                    .remaining_accounts
-                    .iter()
-                    .find(|account| account.key == &user_pda)
-                    .ok_or_else(|| ErrorCode::UserNotFound)?;
+        // Update the current milestone
+        global_state.current_milestone = milestone_idx as u8;
     
-                let mut user_state: Account<MilestoneUnlockAccount> =
-                    Account::try_from(user_account_info)?;
+        let milestone = &global_state.milestones[milestone_idx - 1]; // Unlock tokens for this milestone
     
-                // Unlock tokens based on the milestone's percentage
-                let total_unlockable_tokens = user_state
-                    .total_locked_tokens
-                    .checked_mul(milestone.unlock_percent as u64)
-                    .ok_or::<anchor_lang::error::Error>(ErrorCode::ArithmeticOverflow.into())? // This will now work
-                    / 100;
-
-                // Find the user's associated token account (ATA) in the remaining accounts
-                let ata_account_info = ctx
-                .remaining_accounts
-                .iter()
-                .find(|account| account.key == &user_state.ata)
-                .ok_or(ErrorCode::UserWalletNotFound)?;
-
-                let mut new_unlock: u64;
-                
-                if global_state.unlock_complete {
-                    new_unlock = user_state.total_locked_tokens;
-                    // Full unlock bypasses anti-whale restrictions
-                    msg!("Full unlock: {} tokens unlocked for user: {:?}", new_unlock, user_state.wallet);
-                } else {
-                    // Check if the user is exempted from anti-whale restrictions
-                    if global_state.exempted_wallets.contains(&user_state.wallet) {
-                        new_unlock = total_unlockable_tokens - user_state.unlocked_tokens;
-                        msg!("Exempted wallet: {} tokens unlocked for user: {:?}", new_unlock, user_state.wallet);
+        msg!(
+            "Processing milestone {}: Unlock {}% (Current Market Cap: {})",
+            milestone_idx - 1,
+            milestone.unlock_percent,
+            market_cap
+        );
+    
+        let account_chunks: Vec<AccountInfo<'info>> = ctx.remaining_accounts.iter().cloned().collect::<Vec<AccountInfo<'info>>>();
+        for account_chunk in account_chunks.chunks(2) {
+            let mut account_iter = account_chunk.into_iter();
+            let user_pda = account_iter.next().ok_or(ErrorCode::AccountNotEnough)?;
+            let ata_account = account_iter.next().ok_or(ErrorCode::AccountNotEnough)?;
+        
+            // Deserialize user state
+            let mut user_state: MilestoneUnlockAccount =
+                AccountDeserialize::try_deserialize(&mut &**user_pda.try_borrow_mut_data()?)
+                    .map_err(|_| ErrorCode::DeserializationFailed)?;
+        
+            // Calculate the unlockable tokens
+            let tokens_to_unlock = user_state
+                .total_locked_tokens
+                .checked_mul(milestone.unlock_percent as u64)
+                .ok_or(ErrorCode::ArithmeticOverflow)?
+                / 100;
+        
+            let mut unlocked_tokens = tokens_to_unlock;
+        
+            if !global_state.unlock_complete {
+                // Check for anti-whale exemptions
+                if !global_state.exempted_wallets.contains(&user_state.wallet) {
+                    let recipient_balance = get_token_balance(&ata_account)?;
+                    let max_available_unlock = if recipient_balance + unlocked_tokens > MAX_HOLD_AMOUNT {
+                        MAX_HOLD_AMOUNT.saturating_sub(recipient_balance)
                     } else {
-                        // Anti-whale restrictions apply
-                        new_unlock = total_unlockable_tokens - user_state.unlocked_tokens;
-                        // Fetch recipient's current token balance
-                        let recipient_balance = get_token_balance(ata_account_info.clone())?;
-                        // Calculate post-transfer balance
-                        let after_transfer_balance = recipient_balance + new_unlock;
-                        
-                        if after_transfer_balance > MAX_HOLD_AMOUNT {
-                            // Anti-whale restriction: Max 50,000,000 tokens can be held by a user now.
-                            let available_unlock = MAX_HOLD_AMOUNT - recipient_balance;
-                            new_unlock = available_unlock;
-                            msg!("Anti-whale restriction: {} tokens unlocked for user: {:?}", available_unlock, user_state.wallet);
-                            
-                        }
+                        unlocked_tokens
+                    };
+                    if max_available_unlock < unlocked_tokens {
+                        msg!(
+                            "Anti-whale restriction applied: Unlock limited for user {:?}",
+                            user_state.wallet
+                        );
+                        unlocked_tokens = max_available_unlock;
                     }
                 }
-                
-                if new_unlock > 0 {
-                    // Transfer tokens from the project wallet to the user's ATA using a CPI
-                    let cpi_accounts = token::Transfer {
-                        from: ctx.accounts.project_wallet.to_account_info(),
-                        to: ata_account_info.clone(), // Use the fetched AccountInfo for ATA
-                        authority: ctx.accounts.project_wallet_authority.to_account_info(),
-                    };
-    
-                    token::transfer(
-                        CpiContext::new(ctx.accounts.token_program.to_account_info(), cpi_accounts),
-                        new_unlock,
-                    ).map_err(|_| ErrorCode::TokenTransferFailed)?;
-    
-                    // Update the user's unlocked token count
-                    user_state.unlocked_tokens += new_unlock;
-                    user_state.total_locked_tokens -= new_unlock;
-                    user_state.last_unlocked_milestone = global_state.current_milestone;
-
-                    emit!(MilestoneProcessed {
-                        wallet: user_state.wallet,
-                        unlocked_tokens: new_unlock,
-                        milestone_index: global_state.current_milestone,
-                    });
-    
-                    // Log the unlocking process
-                    msg!(
-                        "Unlocked {} tokens for user: {:?}",
-                        new_unlock,
-                        user_state.wallet
-                    );
-                }
             }
-    
+        
+            if unlocked_tokens == 0 {
+                continue;
+            }
+        
+            // Apply the tax deduction (1.5%)
+            let tax = unlocked_tokens.checked_mul(15).ok_or(ErrorCode::ArithmeticOverflow)? / 1000;
+            let post_tax_tokens = unlocked_tokens.checked_sub(tax).ok_or(ErrorCode::ArithmeticOverflow)?;
+        
+            // Split the tax between Burn Wallet and Marketing Wallet
+            let tax_burn = tax.checked_div(2).ok_or(ErrorCode::ArithmeticOverflow)?;
+            let tax_marketing = tax.checked_sub(tax_burn).ok_or(ErrorCode::ArithmeticOverflow)?;
+        
+            // Transfer post-tax tokens to the user
+            let cpi_transfer_to_user = token::Transfer {
+                from: ctx.accounts.project_wallet.to_account_info(),
+                to: ata_account.to_account_info(),
+                authority: ctx.accounts.project_wallet_authority.to_account_info(),
+            };
+        
+            token::transfer(
+                CpiContext::new(ctx.accounts.token_program.to_account_info(), cpi_transfer_to_user),
+                post_tax_tokens,
+            )?;
+        
+            // Transfer tax to Burn Wallet
+            let cpi_transfer_to_burn = token::Transfer {
+                from: ctx.accounts.project_wallet.to_account_info(),
+                to: ctx.accounts.burn_wallet.to_account_info(),
+                authority: ctx.accounts.project_wallet_authority.to_account_info(),
+            };
+        
+            token::transfer(
+                CpiContext::new(ctx.accounts.token_program.to_account_info(), cpi_transfer_to_burn),
+                tax_burn,
+            )?;
+        
+            // Transfer tax to Marketing Wallet
+            let cpi_transfer_to_marketing = token::Transfer {
+                from: ctx.accounts.project_wallet.to_account_info(),
+                to: ctx.accounts.marketing_wallet.to_account_info(),
+                authority: ctx.accounts.project_wallet_authority.to_account_info(),
+            };
+        
+            token::transfer(
+                CpiContext::new(
+                    ctx.accounts.token_program.to_account_info(),
+                    cpi_transfer_to_marketing,
+                ),
+                tax_marketing,
+            )?;
+        
+            // Update user state
+            user_state.total_locked_tokens = user_state
+                .total_locked_tokens
+                .checked_sub(unlocked_tokens)
+                .ok_or(ErrorCode::ArithmeticOverflow)?;
+            user_state.unlocked_tokens = user_state
+                .unlocked_tokens
+                .checked_add(unlocked_tokens)
+                .ok_or(ErrorCode::ArithmeticOverflow)?;
+            user_state.last_unlocked_milestone = global_state.current_milestone;
+        
+            // Serialize updated state back into user PDA
+            user_state
+                .try_serialize(&mut *user_pda.try_borrow_mut_data()?)
+                .map_err(|_| ErrorCode::SerializationFailed)?;
+        
+            // Emit milestone processed event
+            emit!(MilestoneProcessed {
+                wallet: user_state.wallet,
+                unlocked_tokens: post_tax_tokens, // Post-tax tokens unlocked
+                milestone_index: global_state.current_milestone,
+                tax,                              // Total tax amount deducted
+                burn_tax: tax_burn,               // Tax sent to Burn Wallet
+                marketing_tax: tax_marketing,     // Tax sent to Marketing Wallet
+            });
+        
+            msg!(
+                "User {:?}: Unlocked {} tokens ({} taxed, {} to Burn Wallet, {} to Marketing Wallet)",
+                user_state.wallet,
+                post_tax_tokens,
+                tax,
+                tax_burn,
+                tax_marketing
+            );
         }
     
         Ok(())
@@ -356,6 +364,99 @@ pub mod automated_presale {
             market_cap
         );
     
+        Ok(())
+    } 
+
+    pub fn register_user_on_project_wallet_transfer(
+        ctx: Context<RegisterUserOnTransfer>,
+        user_wallet: Pubkey, // The wallet address of the user
+        locked_amount: u64,  // The locked token amount to track
+    ) -> Result<()> {
+        let global_state = &mut ctx.accounts.global_state;
+
+        // STEP 1: Derive the User PDA
+        let (user_pda, bump) = Pubkey::find_program_address(
+            &[b"user_state", user_wallet.as_ref()], // PDA seeds
+            ctx.program_id,
+        );
+
+        // Ensure that the provided PDA matches the derived address
+        if ctx.accounts.user_state.key() != user_pda {
+            return Err(ErrorCode::UserNotFound.into());
+        }
+
+        // STEP 2: Deserialize PDA or Initialize If Necessary
+        if ctx.accounts.user_state.data_is_empty() {
+            // If the PDA is empty, initialize it
+            let lamports = Rent::get()?.minimum_balance(MilestoneUnlockAccount::LEN);
+
+            let create_instruction = solana_program::system_instruction::create_account(
+                &ctx.accounts.authority.key(), // Payer
+                &user_pda,                     // New PDA
+                lamports,                      // Rent exemption
+                MilestoneUnlockAccount::LEN as u64, // Space required
+                ctx.program_id,                // PDA owner = this program
+            );
+
+            solana_program::program::invoke_signed(
+                &create_instruction,
+                &[
+                    ctx.accounts.system_program.to_account_info(),
+                    ctx.accounts.user_state.to_account_info(),
+                    ctx.accounts.authority.to_account_info(),
+                ],
+                &[&[b"user_state", user_wallet.as_ref(), &[bump]]], // PDA seeds and bump
+            )?;
+
+            // Initialize state manually now that PDA is created
+            let mut data = ctx.accounts.user_state.try_borrow_mut_data()?;
+            let milestone_state = MilestoneUnlockAccount {
+                wallet: user_wallet,
+                ata: get_associated_token_address(&user_wallet, &global_state.token_mint),
+                total_locked_tokens: locked_amount,
+                unlocked_tokens: 0,
+                last_unlocked_milestone: 0,
+            };
+
+            // Serialize the initialized state into the PDA's account
+            milestone_state.serialize(&mut &mut data[..])?;
+
+            msg!(
+                "Initialized and registered new PDA for user {:?} with locked tokens: {}",
+                user_wallet,
+                locked_amount
+            );
+
+            global_state.user_count += 1;
+        } else {
+            // PDA exists: Deserialize the data
+            let mut data = ctx.accounts.user_state.try_borrow_mut_data()?;
+            let mut milestone_account =
+                MilestoneUnlockAccount::try_from_slice(&data).map_err(|_| ErrorCode::DeserializationFailed)?;
+
+            // Update the existing PDA data
+            milestone_account.total_locked_tokens = milestone_account
+                .total_locked_tokens
+                .checked_add(locked_amount)
+                .ok_or(ErrorCode::ArithmeticOverflow)?;
+
+            // Serialize the updated data back into the PDA's account
+            milestone_account.serialize(&mut &mut data[..])?;
+
+            msg!(
+                "Updated user PDA: {:?} with additional locked tokens: {}",
+                user_wallet,
+                locked_amount
+            );
+        }
+
+        // STEP 3: Emit Event
+        emit!(UserRegistered {
+            wallet: user_wallet,
+            locked_tokens: locked_amount,
+            ata: get_associated_token_address(&user_wallet, &global_state.token_mint),
+        });
+
         Ok(())
     }
 }
@@ -479,12 +580,13 @@ pub struct RegisterUsers<'info> {
 pub struct UnlockTokens<'info> {
     #[account(mut)]
     pub global_state: Account<'info, GlobalState>,
-    /// CHECK: Raydium or Orca destination wallet for liquidity (e.g., a USDC SPL token account)
-    #[account(mut)]
-    pub liquidity_wallet: AccountInfo<'info>, // Wallet to hold liquidity
     #[account(mut)]
     pub project_wallet: Account<'info, TokenAccount>,
     pub project_wallet_authority: Signer<'info>,
+    #[account(mut)]
+    pub burn_wallet: Account<'info, TokenAccount>,
+    #[account(mut)]
+    pub marketing_wallet: Account<'info, TokenAccount>,
     pub token_program: Program<'info, Token>,
 }
 
@@ -510,9 +612,26 @@ pub struct UpdateMarketCap<'info> {
     pub authority: Signer<'info>,                 // Signer (admin authority)
 }
 
+#[derive(Accounts)]
+pub struct RegisterUserOnTransfer<'info> {
+    #[account(mut)]
+    pub global_state: Account<'info, GlobalState>, // Global state account that stores global data
+    #[account(mut)]
+    pub project_wallet: Account<'info, TokenAccount>, // Project wallet receiving locked tokens
+    #[account(mut)]
+    pub authority: Signer<'info>, // The signer who calls this transaction (payer for accounts)
+    pub rent: Sysvar<'info, Rent>, // Rent sysvar
+    pub system_program: Program<'info, System>,  // System program (for creating PDAs)
+    pub token_program: Program<'info, Token>, // SPL Token Program for token transfers
+    /// CHECK: Associated Token Program
+    pub associated_token_program: AccountInfo<'info>,
+    #[account(mut)] // User state PDA manually validated inside the function
+    pub user_state: AccountInfo<'info>, // User-specific PDA account
+}
 
 
-fn get_token_balance(token_account: AccountInfo) -> Result<u64> {
+
+fn get_token_balance(token_account: &AccountInfo) -> Result<u64> {
     // Use the spl_token::state::Account to access the token balance
     let data = spl_token::state::Account::unpack(&token_account.data.borrow()).map_err(|_| ErrorCode::TokenAccountCreationFailed)?;
     Ok(data.amount)
@@ -594,6 +713,10 @@ pub enum ErrorCode {
     InvalidMarketingWallet,
     #[msg("Invalid project wallet account")]
     InvalidProjectWallet,
+    #[msg("Deserialization failed")]
+    DeserializationFailed,
+    #[msg("Serialization failed")]
+    SerializationFailed,
 }
 
 #[event]
@@ -601,13 +724,6 @@ pub struct UserRegistered {
     pub wallet: Pubkey,
     pub locked_tokens: u64,
     pub ata: Pubkey,
-}
-
-#[event]
-pub struct MilestoneProcessed {
-    pub wallet: Pubkey,
-    pub unlocked_tokens: u64,
-    pub milestone_index: u8,
 }
 
 #[event]
@@ -621,4 +737,14 @@ pub struct AutoSellTriggered {
     pub sell_amount: u64,              // Number of tokens sold
     pub wallet: Pubkey,                // Project Wallet public key
     pub destination: Pubkey,           // Liquidity destination (e.g., USDC wallet)
+}
+
+#[event]
+pub struct MilestoneProcessed {
+    pub wallet: Pubkey,
+    pub unlocked_tokens: u64,
+    pub milestone_index: u8,
+    pub tax: u64,
+    pub burn_tax: u64,
+    pub marketing_tax: u64,
 }
