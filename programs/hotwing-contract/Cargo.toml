@@ -14,13 +14,12 @@ no-log-ix-name = []
 
 [lib]
 crate-type = ["cdylib", "lib"]
-
-[build]
-rustflags = ["-Clinker=lld"]
-
 [dependencies]
-anchor-lang = { version = "0.30.1", features = ["init-if-needed"] }     # Anchor framework core library 
-anchor-spl = "0.30.1"      # Anchor framework SPL (Solana Program Library) integration 
+anchor-lang = { version = "0.30.1", features = ["init-if-needed"] }
+anchor-spl = "0.30.1"
 solana-program = "=1.18.26"
-spl-token = "=3.5.0"
-spl-token-2022 = "=3.0.5"
+spl-token = { version = "=3.5.0", default-features = false , features = ["no-entrypoint"] }
+spl-token-2022 = { version = "=3.0.5", default-features = false }
+spl-associated-token-account = { version = "=2.3.0", features = ["no-entrypoint"] }
+borsh = "=0.9.3"
+
