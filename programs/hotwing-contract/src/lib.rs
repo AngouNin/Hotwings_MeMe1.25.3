@@ -101,19 +101,37 @@ pub mod hotwing_contract {
     pub fn register_users(ctx: Context<RegisterUsers>, entries: Vec<UserEntry>) -> Result<()> {
         let global_state = &mut ctx.accounts.global_state;
     
-        // Ensure we do not exceed the MAX_USERS constraint
-        if global_state.user_count as usize + entries.len() > MAX_USERS {
-            return Err(ErrorCode::MaxUsersReached.into());
-        }
+        // Validate the number of users to ensure it doesn't exceed the maximum
+        require!(
+            global_state.user_count as usize + entries.len() <= MAX_USERS,
+            ErrorCode::MaxUsersReached
+        );
     
         for entry in entries.iter() {
 
-            // First, verify if the user is already registered
+            let mut user_exists = false;
+
+            // Iterate over remaining accounts to ensure user is not already registered
             for account_info in ctx.remaining_accounts.iter() {
-                if account_info.key == &entry.wallet { // Check if wallet already exists
-                    return Err(ErrorCode::UserAlreadyRegistered.into());
+                if account_info.key == &entry.wallet {
+                    user_exists = true;
+                    break; // Exit the loop early if we find the user
                 }
             }
+
+            // If the user is already registered, throw an error
+            require!(!user_exists, ErrorCode::UserAlreadyRegistered);
+
+            // Validate locked token amount (non-zero and reasonable)
+            require!(
+                entry.locked_tokens > 0,
+                ErrorCode::ArithmeticOverflow // Or create an ErrorCode like InvalidLockedTokenAmount
+            );
+
+            require!(
+                entry.locked_tokens <= MAX_HOLD_AMOUNT,
+                ErrorCode::ArithmeticOverflow // Or another custom error code
+            );
 
             // Derive the user's associated token account (ATA)
             let user_ata = get_associated_token_address(&entry.wallet, &global_state.token_mint);
@@ -156,7 +174,10 @@ pub mod hotwing_contract {
             user_state.last_unlocked_milestone = 0; // No milestones processed
     
             // Increment total user count in global state
-            global_state.user_count += 1;
+            global_state.user_count = global_state
+                .user_count
+                .checked_add(1)
+                .ok_or(ErrorCode::ArithmeticOverflow)?; // Stop if user count exceeds `u64::MAX`
 
             // Emit the `UserRegistered` event
             emit!(UserRegistered {
@@ -179,6 +200,18 @@ pub mod hotwing_contract {
 
     pub fn add_exempt_wallet(ctx: Context<ManageExemptWallet>, wallet: Pubkey) -> Result<()> {
         let global_state = &mut ctx.accounts.global_state;
+
+        // Ensure that exempted wallets do not exceed the limit
+        require!(
+            global_state.exempted_wallets.len() < MAX_EXEMPTED_WALLETS,
+            ErrorCode::MaxUsersReached // Reuse or create ErrorCode::MaxExemptedWallets
+        );
+
+        // Ensure the wallet is not a duplicate
+        require!(
+            !global_state.exempted_wallets.contains(&wallet),
+            ErrorCode::UserAlreadyRegistered // Or another error code like DuplicateExemptWallet
+        );
     
         // Ensure the wallet is not already in the exempt list
         if !global_state.exempted_wallets.contains(&wallet) {
@@ -213,6 +246,9 @@ pub mod hotwing_contract {
         market_cap: u64,
     ) -> Result<()> {
         let global_state = &mut ctx.accounts.global_state;
+        // Validate the market cap
+        require!(market_cap > 0, ErrorCode::InvalidMarketCapValue);
+        require!(market_cap < 10_000_000, ErrorCode::InvalidMarketCapValue); // Arbitrary max for safety
     
         // Update global market cap
         global_state.current_market_cap = market_cap;
@@ -223,9 +259,22 @@ pub mod hotwing_contract {
             msg!("Full unlocking allowed: Three months passed or max market cap reached.");
             global_state.unlock_complete = true;
         }
+
+        // Ensure there are enough remaining accounts for milestone processing.
+        require!(
+            ctx.remaining_accounts.len() > 1 && ctx.remaining_accounts.len() % 2 == 0,
+            ErrorCode::AccountNotEnough
+        );
     
         // Iterate milestones to find the applicable range
         let mut milestone_idx = global_state.current_milestone as usize;
+
+        // Ensure milestone exists and is valid
+        require!(
+            milestone_idx < global_state.milestones.len(),
+            ErrorCode::MiletoneNotReached
+        );
+
         while milestone_idx < MAX_MILESTONES
             && market_cap >= global_state.milestones[milestone_idx].market_cap
         {
@@ -263,8 +312,9 @@ pub mod hotwing_contract {
             let tokens_to_unlock = user_state
                 .total_locked_tokens
                 .checked_mul(milestone.unlock_percent as u64)
-                .ok_or(ErrorCode::ArithmeticOverflow)?
-                / 100;
+                .ok_or(ErrorCode::ArithmeticOverflow)? // Prevent overflow when multiplying
+                .checked_div(100)
+                .ok_or(ErrorCode::ArithmeticOverflow)?; // Prevent divide-by-zero errors
         
             let mut unlocked_tokens = tokens_to_unlock;
         
@@ -272,8 +322,14 @@ pub mod hotwing_contract {
                 // Check for anti-whale exemptions
                 if !global_state.exempted_wallets.contains(&user_state.wallet) {
                     let recipient_balance = get_token_balance(&ata_account)?;
-                    let max_available_unlock = if recipient_balance + unlocked_tokens > MAX_HOLD_AMOUNT {
-                        MAX_HOLD_AMOUNT.saturating_sub(recipient_balance)
+                    let max_available_unlock = if recipient_balance
+                        .checked_add(unlocked_tokens)
+                        .ok_or(ErrorCode::ArithmeticOverflow)?
+                        > MAX_HOLD_AMOUNT
+                    {
+                        MAX_HOLD_AMOUNT
+                            .checked_sub(recipient_balance)
+                            .ok_or(ErrorCode::ArithmeticOverflow)? // Prevent subtraction underflow
                     } else {
                         unlocked_tokens
                     };
@@ -292,8 +348,15 @@ pub mod hotwing_contract {
             }
         
             // Apply the tax deduction (1.5%)
-            let tax = unlocked_tokens.checked_mul(15).ok_or(ErrorCode::ArithmeticOverflow)? / 1000;
-            let post_tax_tokens = unlocked_tokens.checked_sub(tax).ok_or(ErrorCode::ArithmeticOverflow)?;
+            let tax = unlocked_tokens
+                .checked_mul(15)
+                .ok_or(ErrorCode::ArithmeticOverflow)?
+                .checked_div(1000)
+                .ok_or(ErrorCode::ArithmeticOverflow)?; // Protect against divide-by-zero or large numbers
+
+            let post_tax_tokens = unlocked_tokens
+                .checked_sub(tax)
+                .ok_or(ErrorCode::ArithmeticOverflow)?; // Protect against negative results (underflow)
         
             // Split the tax between Burn Wallet and Marketing Wallet
             let tax_burn = tax.checked_div(2).ok_or(ErrorCode::ArithmeticOverflow)?;

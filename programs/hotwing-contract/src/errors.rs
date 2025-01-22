@@ -33,4 +33,6 @@ pub enum ErrorCode {
     DeserializationFailed,
     #[msg("Serialization failed")]
     SerializationFailed,
+    #[msg("Invalid market cap value")]
+    InvalidMarketCapValue, 
 }
