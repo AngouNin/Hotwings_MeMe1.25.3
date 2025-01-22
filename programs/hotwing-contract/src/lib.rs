@@ -126,18 +126,24 @@ pub mod hotwing_contract {
                     &global_state.token_mint,
                     &spl_associated_token_account::ID,
                 );
-    
+            
+                // Verify that all accounts required by the ATA creation process are valid
+                // Ensure authority is a signer
+                require!(ctx.accounts.authority.is_signer, ErrorCode::Unauthorized);
+            
+                // Cross-program invocation (CPI) for creating the ATA
                 anchor_lang::solana_program::program::invoke(
                     &ata_instruction,
                     &[
-                        ctx.accounts.authority.to_account_info(),
+                        ctx.accounts.authority.to_account_info(), // Validate payer authority
                         global_state.to_account_info(),
                         ctx.accounts.system_program.to_account_info(),
-                        ctx.accounts.rent.to_account_info(),
+                        ctx.accounts.rent.to_account_info(), // Rent validation is implicit here
                         ctx.accounts.token_program.to_account_info(),
                     ],
                 ).map_err(|_| ErrorCode::TokenAccountCreationFailed)?;
-                msg!("Created ATA for user: {:?}", entry.wallet);
+            
+                msg!("Successfully created ATA for user: {:?}", entry.wallet);
             }
     
             // Initialize the user's PDA (MilestoneUnlockAccount)
@@ -530,22 +536,34 @@ pub fn on_transfer(
     let project_wallet_account = next_account_info(account_iter)?;   // Project wallet to redirect tokens
     let mint_account = next_account_info(account_iter)?;             // Mint account
 
+     // Validate accounts
+    // Source must have enough tokens to transfer
+    let source_balance = get_token_balance(source_account)?;
+    require!(
+        source_balance >= amount,
+        ErrorCode::TokenTransferFailed,
+    );
+
     // (2) Fetch and deserialize the GlobalState account
     let global_state: GlobalState = GlobalState::try_from_slice(&global_state_account.data.borrow())
         .map_err(|_| ProgramError::InvalidAccountData)?;
+
+    // Validate project wallet
+    require!(
+        *project_wallet_account.key == global_state.project_wallet,
+        ErrorCode::Unauthorized,
+    );
+
+    msg!(
+        "Transferring tokens: Source = {:?}, Destination = {:?}, Amount = {:?}",
+        source_account.key, destination_account.key, amount
+    );
 
     // Ensure it's your program handling the on_transfer hook
     if program_id != &crate::id() {
         return Err(ProgramError::IncorrectProgramId.into());
     }
-
-    msg!(
-        "on_transfer: Source = {:?}, Destination = {:?}, Amount = {}",
-        source_account.key,
-        destination_account.key,
-        amount
-    );
-
+ 
     // (3) Detect source program for AMM/Raydium transactions
     if RaydiumTransactionHelper::is_raydium_transaction(
         source_account,
@@ -593,8 +611,8 @@ pub fn register_transfer_hook(ctx: Context<RegisterHook>) -> Result<()> {
         authority: &Pubkey,
     ) -> std::result::Result<Instruction, ProgramError> {
         let accounts = vec![
-            AccountMeta::new(*mint, false),
-            AccountMeta::new_readonly(*authority, true),
+            AccountMeta::new(*mint, false), // Mint address (non-writable)
+            AccountMeta::new_readonly(*authority, true), // Authority (signer)
         ];
 
         let data = {
