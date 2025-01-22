@@ -30,17 +30,39 @@ pub mod hotwing_contract {
     /// Initialize the program with milestones and setup global state
     pub fn initialize_program(ctx: Context<InitializeProgram>, raydium_program_id: Pubkey) -> Result<()> {
         let global_state = &mut ctx.accounts.global_state;
-        // Ensure burn_wallet is a valid writable account
+
+        // Runtime validations for wallets
         let burn_wallet_account = &ctx.accounts.burn_wallet;
+        let marketing_wallet_account = &ctx.accounts.marketing_wallet;
+        let project_wallet_account = &ctx.accounts.project_wallet;
+        // Ensure burn_wallet is not a PDA and is an externally owned account
+        require!(
+            burn_wallet_account.lamports() > 0 
+            && burn_wallet_account.owner == &solana_program::system_program::ID,
+            ErrorCode::InvalidBurnWallet
+        );
+
+        // Ensure marketing_wallet is not a PDA and is an externally owned account
+        require!(
+            marketing_wallet_account.lamports() > 0 
+            && marketing_wallet_account.owner == &solana_program::system_program::ID,
+            ErrorCode::InvalidMarketingWallet
+        );
+
+        // Ensure project_wallet is not a PDA and is an externally owned account
+        require!(
+            project_wallet_account.lamports() > 0 
+            && project_wallet_account.owner == &solana_program::system_program::ID,
+            ErrorCode::InvalidProjectWallet
+        );
+        // Ensure burn_wallet is a valid writable account 
         if !burn_wallet_account.is_writable {
             return Err(ErrorCode::InvalidBurnWallet.into());
             
-        }
-        let marketing_wallet_account = &ctx.accounts.marketing_wallet;
+        } 
         if !marketing_wallet_account.is_writable {
             return Err(ErrorCode::InvalidMarketingWallet.into());
-        }
-        let project_wallet_account = &ctx.accounts.project_wallet;
+        } 
         if !project_wallet_account.is_writable {
             return Err(ErrorCode::InvalidProjectWallet.into());
         }

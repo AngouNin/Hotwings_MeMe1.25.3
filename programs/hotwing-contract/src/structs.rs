@@ -49,6 +49,41 @@ impl GlobalState {
         + 32;
 }
 
+#[derive(Accounts)]
+pub struct InitializeProgram<'info> {
+    #[account(init, payer = authority, space = 8 + GlobalState::LEN)]
+    pub global_state: Account<'info, GlobalState>,
+    /// The Token Mint account
+    pub token_mint: Account<'info, Mint>, // Correct type for SPL Token Mint
+    /// The Burn Wallet
+    /// CHECK: This must be a standard wallet. Use constraints to validate.
+    #[account(
+        constraint = burn_wallet.lamports() > 0 @ ErrorCode::InvalidBurnWallet,  // Ensure account exists
+        constraint = *burn_wallet.owner == solana_program::system_program::ID @ ErrorCode::InvalidBurnWallet // Ensure it's not owned by another program
+    )]
+    pub burn_wallet: AccountInfo<'info>, // Burn wallet
+
+    /// The Marketing Wallet
+    /// CHECK: This must be a standard wallet. Use constraints to validate.
+    #[account(
+        constraint = marketing_wallet.lamports() > 0 @ ErrorCode::InvalidMarketingWallet, // Ensure account exists
+        constraint = *marketing_wallet.owner == solana_program::system_program::ID @ ErrorCode::InvalidMarketingWallet // Ensure it's not owned by another program
+    )]
+    pub marketing_wallet: AccountInfo<'info>, // Marketing wallet
+    /// The Project Wallet
+    /// CHECK: This must be a standard wallet. Use constraints to validate.
+    #[account(
+        constraint = project_wallet.lamports() > 0 @ ErrorCode::InvalidProjectWallet, // Ensure account exists
+        constraint = *project_wallet.owner == solana_program::system_program::ID @ ErrorCode::InvalidProjectWallet // Ensure it's not owned by another program
+    )]
+    pub project_wallet: AccountInfo<'info>, // Project wallet
+    /// Admin authority
+    #[account(mut)]
+    pub authority: Signer<'info>, // Admin authority
+    /// System program
+    pub system_program: Program<'info, System>, // System Program
+}
+
 // User entry structure (used for registering users)
 #[derive(AnchorSerialize, AnchorDeserialize, Clone)]
 pub struct UserEntry {
@@ -79,26 +114,6 @@ impl MilestoneUnlockAccount {
 pub struct Milestone {
     pub market_cap: u64, // Threshold market cap
     pub unlock_percent: u8, // Percentage of tokens unlocked
-}
-
-#[derive(Accounts)]
-pub struct InitializeProgram<'info> {
-    #[account(init, payer = authority, space = 8 + GlobalState::LEN)]
-    pub global_state: Account<'info, GlobalState>,
-    ///CHECK: Token mint account
-    pub token_mint: Account<'info, Mint>, // Correct type for SPL Token Mint
-    /// CHECK: This is a standard wallet account, and the program will verify its usage
-    pub burn_wallet: AccountInfo<'info>, // Standard wallet (not SPL Token Account)
-    /// CHECK: This is a standard wallet account, and the program will verify its usage
-    pub marketing_wallet: AccountInfo<'info>, // Standard wallet
-    /// CHECK: This is a standard wallet account, and the program will verify its usage
-    pub project_wallet: AccountInfo<'info>, // Standard wallet
-
-    #[account(mut)]
-    ///CHECK: This is a standard wallet account, and the program will verify its usage
-    pub authority: Signer<'info>, // Admin authority
-
-    pub system_program: Program<'info, System>, // System Program
 }
 
 #[derive(Accounts)]
