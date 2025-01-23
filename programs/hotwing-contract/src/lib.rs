@@ -1,4 +1,5 @@
 use anchor_lang::prelude::*;
+use anchor_spl::associated_token::get_associated_token_address;
 use spl_token::solana_program::program_pack::Pack;
 use solana_program::{
     account_info::AccountInfo,
@@ -468,99 +469,6 @@ pub mod hotwing_contract {
         Ok(())
     } 
 
-    pub fn register_user_on_project_wallet_transfer(
-        ctx: Context<RegisterUserOnTransfer>,
-        user_wallet: Pubkey, // The wallet address of the user
-        locked_amount: u64,  // The locked token amount to track
-    ) -> Result<()> {
-        let global_state = &mut ctx.accounts.global_state;
-
-        // STEP 1: Derive the User PDA
-        let (user_pda, bump) = Pubkey::find_program_address(
-            &[b"user_state", user_wallet.as_ref()], // PDA seeds
-            ctx.program_id,
-        );
-
-        // Ensure that the provided PDA matches the derived address
-        if ctx.accounts.user_state.key() != user_pda {
-            return Err(ErrorCode::UserNotFound.into());
-        }
-
-        // STEP 2: Deserialize PDA or Initialize If Necessary
-        if ctx.accounts.user_state.data_is_empty() {
-            // If the PDA is empty, initialize it
-            let lamports = Rent::get()?.minimum_balance(MilestoneUnlockAccount::LEN);
-
-            let create_instruction = solana_program::system_instruction::create_account(
-                &ctx.accounts.authority.key(), // Payer
-                &user_pda,                     // New PDA
-                lamports,                      // Rent exemption
-                MilestoneUnlockAccount::LEN as u64, // Space required
-                ctx.program_id,                // PDA owner = this program
-            );
-
-            solana_program::program::invoke_signed(
-                &create_instruction,
-                &[
-                    ctx.accounts.system_program.to_account_info(),
-                    ctx.accounts.user_state.to_account_info(),
-                    ctx.accounts.authority.to_account_info(),
-                ],
-                &[&[b"user_state", user_wallet.as_ref(), &[bump]]], // PDA seeds and bump
-            )?;
-
-            // Initialize state manually now that PDA is created
-            let mut data = ctx.accounts.user_state.try_borrow_mut_data()?;
-            let milestone_state = MilestoneUnlockAccount {
-                wallet: user_wallet,
-                ata: get_associated_token_address(&user_wallet, &global_state.token_mint),
-                total_locked_tokens: locked_amount,
-                unlocked_tokens: 0,
-                last_unlocked_milestone: 0,
-            };
-
-            // Serialize the initialized state into the PDA's account
-            milestone_state.serialize(&mut &mut data[..])?;
-
-            msg!(
-                "Initialized and registered new PDA for user {:?} with locked tokens: {}",
-                user_wallet,
-                locked_amount
-            );
-
-            global_state.user_count += 1;
-        } else {
-            // PDA exists: Deserialize the data
-            let mut data = ctx.accounts.user_state.try_borrow_mut_data()?;
-            let mut milestone_account =
-                MilestoneUnlockAccount::try_from_slice(&data).map_err(|_| ErrorCode::DeserializationFailed)?;
-
-            // Update the existing PDA data
-            milestone_account.total_locked_tokens = milestone_account
-                .total_locked_tokens
-                .checked_add(locked_amount)
-                .ok_or(ErrorCode::ArithmeticOverflow)?;
-
-            // Serialize the updated data back into the PDA's account
-            milestone_account.serialize(&mut &mut data[..])?;
-
-            msg!(
-                "Updated user PDA: {:?} with additional locked tokens: {}",
-                user_wallet,
-                locked_amount
-            );
-        }
-
-        // STEP 3: Emit Event
-        emit!(UserRegistered {
-            wallet: user_wallet,
-            locked_tokens: locked_amount,
-            ata: get_associated_token_address(&user_wallet, &global_state.token_mint),
-        });
-
-        Ok(())
-    }
-
     pub fn update_raydium_program_id(ctx: Context<UpdateRaydiumProgramId>, new_raydium_program_id: Pubkey) -> Result<()> {
         let global_state = &mut ctx.accounts.global_state;
     
@@ -585,47 +493,68 @@ pub mod hotwing_contract {
 /// Token-2022 will invoke it automatically on token transfer.
 /// This function is NOT an Anchor instruction.
 /// Function that serves as the on-transfer hook
-pub fn on_transfer(
+pub fn on_transfer<'a>(
     program_id: &Pubkey,
-    accounts: &[AccountInfo], // Account list: source, destination, global state, etc.
-    amount: u64,              // Number of tokens being transferred
+    accounts: &'a [AccountInfo<'a>], // Account list: source, destination, global state, etc.
+    amount: u64,                     // Number of tokens being transferred
 ) -> Result<()> {
-    let account_iter = &mut accounts.iter();
 
-    // (1) Extract necessary accounts from the account list
-    let source_account = next_account_info(account_iter)?;           // Source account (sending tokens)
-    let destination_account = next_account_info(account_iter)?;      // Destination account
-    let global_state_account = next_account_info(account_iter)?;     // Global state account
-    let project_wallet_account = next_account_info(account_iter)?;   // Project wallet to redirect tokens
-    let mint_account = next_account_info(account_iter)?;             // Mint account
+    // Dynamically find critical accounts
+    let source_account = find_account(accounts, |acc: &AccountInfo| {
+        // Source: must belong to a user and hold tokens
+        is_token_account(acc) // Validate it's a token account
+    })?;
 
-     // Validate accounts
-    // Source must have enough tokens to transfer
-    let source_balance = get_token_balance(source_account)?;
-    require!(
-        source_balance >= amount,
-        ErrorCode::TokenTransferFailed,
-    );
+    let destination_account = find_account(accounts, |acc| {
+        // Destination: must belong to user and hold tokens
+        is_token_account(acc) // Validate it's a token account
+    })?;
 
-    // (2) Fetch and deserialize the GlobalState account
+    let mint_account = find_account(accounts, |acc| {
+        // Mint: must match the token mint in transfer
+        is_mint_account(acc)
+    })?;
+
+    let global_state_account = find_account(accounts, |acc| {
+        // Global state: must match the program's global state
+        acc.owner == program_id
+    })?;
+
+    // Deserialize the global state
     let global_state: GlobalState = GlobalState::try_from_slice(&global_state_account.data.borrow())
         .map_err(|_| ProgramError::InvalidAccountData)?;
 
-    // Validate project wallet
+    
+    let project_wallet_account = find_account(accounts, |acc| {
+        // Project wallet: must match the one in global state
+        acc.key == &global_state.project_wallet
+    })?;
+    
+    // Security: Validate project wallet against global state
     require!(
         *project_wallet_account.key == global_state.project_wallet,
-        ErrorCode::Unauthorized,
+        ErrorCode::Unauthorized
     );
+    // Ensure that all accounts are correctly identified
+    msg!("Source Account: {:?}", source_account.key);
+    msg!("Destination Account: {:?}", destination_account.key);
+    msg!("Mint Account: {:?}", mint_account.key);
+    msg!("Global State Account: {:?}", global_state_account.key);
+    msg!("Project Wallet Account: {:?}", project_wallet_account.key);
+
+    // Validate balance of source account
+    let source_balance = get_token_balance(source_account)?;
+    require!(
+        source_balance >= amount,
+        ErrorCode::TokenTransferFailed
+    );
+
+    
 
     msg!(
-        "Transferring tokens: Source = {:?}, Destination = {:?}, Amount = {:?}",
+        "Transferring tokens: Source: {:?}, Destination: {:?}, Amount: {:?}",
         source_account.key, destination_account.key, amount
     );
-
-    // Ensure it's your program handling the on_transfer hook
-    if program_id != &crate::id() {
-        return Err(ProgramError::IncorrectProgramId.into());
-    }
  
     // (3) Detect source program for AMM/Raydium transactions
     if RaydiumTransactionHelper::is_raydium_transaction(
@@ -652,17 +581,128 @@ pub fn on_transfer(
             &[
                 source_account.clone(),
                 project_wallet_account.clone(),
-                destination_account.clone(),
+                mint_account.clone(),
             ],
         )?;
 
         // Log post-transfer
         msg!("Tokens redirected to project wallet.");
+
+        // (2) Automatically Register User
+        msg!("Automatically registering user from Raydium transaction: {:?}", source_account.key);
+
+        // Retrieve or initialize the user
+        let user_state_account = find_account(accounts, |acc| {
+            // User state account must be derived based on the user's key
+            let (pda, _bump) = Pubkey::find_program_address(
+                &[b"user_state", source_account.key.as_ref()], // Seed for the PDA
+                program_id,
+            );
+            acc.key == &pda
+        }).ok();
+
+        // Call the logic for registering a user (using your existing function)
+        register_user_internal(
+            program_id,
+            source_account.key,      // User's wallet
+            global_state_account,    // Global state
+            user_state_account,      // User state PDA (if it exists)
+            amount,                  // Amount transferred
+            project_wallet_account,  // Reference to the project wallet
+        )?;
+
+        msg!("User successfully registered: {:?}", source_account.key);
     } else {
         msg!("Normal transfer logic executed.");
     }
 
     Ok(())
+}
+
+fn register_user_internal(
+    program_id: &Pubkey,
+    user_wallet: &Pubkey,
+    global_state_account: &AccountInfo,
+    user_state_account: Option<&AccountInfo>, // User state PDA (if it exists)
+    locked_amount: u64,                      // The amount of tokens locked
+    project_wallet_account: &AccountInfo,
+) -> Result<()> {
+    // Deserialize Global State
+    let global_state: GlobalState = GlobalState::try_from_slice(&global_state_account.data.borrow())
+        .map_err(|_| ErrorCode::DeserializationFailed)?;
+
+    // If the PDA exists, update the existing user state
+    if let Some(user_pda) = user_state_account {
+        // Deserialize the user state
+        let mut user_state: MilestoneUnlockAccount = MilestoneUnlockAccount::try_from_slice(&user_pda.data.borrow())
+            .map_err(|_| ErrorCode::DeserializationFailed)?;
+
+        // Update the locked tokens
+        user_state.total_locked_tokens = user_state
+            .total_locked_tokens
+            .checked_add(locked_amount)
+            .ok_or(ErrorCode::ArithmeticOverflow)?;
+
+        // Serialize the updated User PDA
+        user_state.serialize(&mut *user_pda.data.borrow_mut())?;
+        msg!("User PDA updated for wallet: {:?} with locked tokens: {}", user_wallet, locked_amount);
+    } else {
+        // If the PDA doesn't exist, create it and initialize the user
+        let (user_pda, _bump) = Pubkey::find_program_address(
+            &[b"user_state", user_wallet.as_ref()],
+            program_id,
+        );
+
+        let lamports = Rent::get()?.minimum_balance(MilestoneUnlockAccount::LEN);
+
+        let create_instruction = solana_program::system_instruction::create_account(
+            project_wallet_account.key,
+            &user_pda,
+            lamports,
+            MilestoneUnlockAccount::LEN as u64,
+            program_id,
+        );
+
+        solana_program::program::invoke(
+            &create_instruction,
+            &[project_wallet_account.clone()],
+        )?;
+
+        // Initialize the user state
+        let user_state = MilestoneUnlockAccount {
+            wallet: *user_wallet,
+            ata: get_associated_token_address(user_wallet, &global_state.token_mint),
+            total_locked_tokens: locked_amount,
+            unlocked_tokens: 0,
+            last_unlocked_milestone: 0,
+        };
+
+        user_state.serialize(&mut *user_state_account.unwrap().data.borrow_mut())?;
+        msg!("New user PDA created for wallet: {:?} with locked tokens: {}", user_wallet, locked_amount);
+    }
+
+    Ok(())
+}
+
+/// Helper function to find a specific account in account slice
+fn find_account<'a, F>(accounts: &'a [AccountInfo<'a>], predicate: F) -> Result<&'a AccountInfo<'a>>
+where
+    F: Fn(&AccountInfo) -> bool,
+{
+    accounts
+        .iter()
+        .find(|acc| predicate(acc))
+        .ok_or(ErrorCode::AccountNotFound.into())
+}
+
+/// Check if an account is a valid token account
+fn is_token_account(account: &AccountInfo) -> bool {
+    account.data_len() == spl_token_2022::state::Account::LEN
+}
+
+/// Check if an account is a valid mint account
+fn is_mint_account(account: &AccountInfo) -> bool {
+    account.data_len() == spl_token_2022::state::Mint::LEN
 }
 
 pub fn register_transfer_hook(ctx: Context<RegisterHook>) -> Result<()> {
