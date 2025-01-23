@@ -437,7 +437,47 @@ pub mod hotwing_contract {
                 tax_marketing
             );
         }
+
+        if global_state.unlock_complete {
+            msg!("Final milestone reached or three-month unlock period expired. Triggering auto-sell.");
+            auto_sell_in_liquidity_pool(ctx)?;
+        }
     
+    
+        Ok(())
+    }
+
+    pub fn auto_sell_in_liquidity_pool<'info>(
+        ctx: Context<'_, '_, '_, 'info, UnlockTokens<'info>>,
+    ) -> Result<()> {
+        let global_state = &ctx.accounts.global_state;
+        
+        // Ensure liquidity pool is initialized
+        if global_state.liquidity_pool == Pubkey::default() {
+            return Err(ErrorCode::LiquidityPoolNotSet.into());
+        }
+    
+        let project_wallet_balance = get_token_balance(&ctx.accounts.project_wallet.to_account_info())?;
+        let sell_amount = project_wallet_balance.checked_mul(25).unwrap().checked_div(100).unwrap(); // 25% of project wallet
+    
+        // Perform the actual swap on Raydium liquidity pool
+        let swap_instruction = raydium_swap_instruction(
+            global_state.liquidity_pool,        // Liquidity pool address
+            ctx.accounts.project_wallet.key(), // Project wallet as the source
+            sell_amount,                        // Amount to sell
+        )?;
+    
+        // Execute the swap instruction
+        solana_program::program::invoke(
+            &swap_instruction,
+            &[
+                ctx.accounts.project_wallet.to_account_info(),
+                ctx.accounts.token_program.to_account_info(),
+                ctx.accounts.project_wallet_authority.to_account_info(), // Fee payer
+            ],
+        )?;
+    
+        msg!("Successfully auto-sold 25% of project wallet tokens in liquidity pool.");
         Ok(())
     }
 
@@ -482,6 +522,80 @@ pub mod hotwing_contract {
     
         msg!("Raydium program ID updated to: {:?}", new_raydium_program_id);
     
+        Ok(())
+    }
+
+
+    pub fn update_liquidity_pool_address(
+        ctx: Context<UpdateLiquidityPoolAddress>,
+        new_liquidity_pool: Pubkey,
+    ) -> Result<()> {
+        let global_state = &mut ctx.accounts.global_state;
+
+        // Ensure only the authority can execute this instruction
+        if ctx.accounts.authority.key() != global_state.authority {
+            return Err(ErrorCode::Unauthorized.into());
+        }
+
+        global_state.liquidity_pool = new_liquidity_pool; // Update the liquidity pool address
+
+        msg!("Liquidity pool address updated to: {:?}", new_liquidity_pool);
+        Ok(())
+    }
+
+    pub fn register_transfer_hook(ctx: Context<RegisterHook>) -> Result<()> {
+        // Define the update_transfer_hook function
+        fn update_transfer_hook(
+            token_program_id: &Pubkey,
+            mint: &Pubkey,
+            hook_program_id: Option<&Pubkey>,
+            authority: &Pubkey,
+        ) -> std::result::Result<Instruction, ProgramError> {
+            let accounts = vec![
+                AccountMeta::new(*mint, false), // Mint address (non-writable)
+                AccountMeta::new_readonly(*authority, true), // Authority (signer)
+            ];
+    
+            let data = {
+                let mut data = Vec::with_capacity(1 + 32 + 1);
+                data.push(0); // Instruction identifier for update_transfer_hook
+                data.extend_from_slice(mint.as_ref());
+                data.push(hook_program_id.is_some() as u8);
+                if let Some(hook_program_id) = hook_program_id {
+                    data.extend_from_slice(hook_program_id.as_ref());
+                }
+                data
+            };
+    
+            Ok(Instruction {
+                program_id: *token_program_id,
+                accounts,
+                data,
+            })
+        }
+    
+        // Program ID to set as the TransferHook handler (your program's ID)
+        let transfer_hook_program_id = crate::id();
+    
+        // Construct the instruction to update the transfer hook
+        let update_ix = update_transfer_hook(
+            &token_2022_program_id(),                     // SPL Token-2022 program
+            &ctx.accounts.token_mint.key(),              // Token-2022 mint address
+            Some(&transfer_hook_program_id),             // Program to be set as the transfer-hook handler
+            &ctx.accounts.authority.key(),               // Authority that manages the token mint
+        )?;
+    
+        // Perform CPI (Cross-Program Invocation) to execute the instruction
+        invoke(
+            &update_ix,
+            &[
+                ctx.accounts.token_mint.to_account_info(),
+                ctx.accounts.token_program.to_account_info(),
+                ctx.accounts.authority.to_account_info(),
+            ],
+        )?;
+    
+        msg!("Transfer hook registered successfully!");
         Ok(())
     }
 
@@ -705,64 +819,24 @@ fn is_mint_account(account: &AccountInfo) -> bool {
     account.data_len() == spl_token_2022::state::Mint::LEN
 }
 
-pub fn register_transfer_hook(ctx: Context<RegisterHook>) -> Result<()> {
-    // Define the update_transfer_hook function
-    fn update_transfer_hook(
-        token_program_id: &Pubkey,
-        mint: &Pubkey,
-        hook_program_id: Option<&Pubkey>,
-        authority: &Pubkey,
-    ) -> std::result::Result<Instruction, ProgramError> {
-        let accounts = vec![
-            AccountMeta::new(*mint, false), // Mint address (non-writable)
-            AccountMeta::new_readonly(*authority, true), // Authority (signer)
-        ];
-
-        let data = {
-            let mut data = Vec::with_capacity(1 + 32 + 1);
-            data.push(0); // Instruction identifier for update_transfer_hook
-            data.extend_from_slice(mint.as_ref());
-            data.push(hook_program_id.is_some() as u8);
-            if let Some(hook_program_id) = hook_program_id {
-                data.extend_from_slice(hook_program_id.as_ref());
-            }
-            data
-        };
-
-        Ok(Instruction {
-            program_id: *token_program_id,
-            accounts,
-            data,
-        })
-    }
-
-    // Program ID to set as the TransferHook handler (your program's ID)
-    let transfer_hook_program_id = crate::id();
-
-    // Construct the instruction to update the transfer hook
-    let update_ix = update_transfer_hook(
-        &token_2022_program_id(),                     // SPL Token-2022 program
-        &ctx.accounts.token_mint.key(),              // Token-2022 mint address
-        Some(&transfer_hook_program_id),             // Program to be set as the transfer-hook handler
-        &ctx.accounts.authority.key(),               // Authority that manages the token mint
-    )?;
-
-    // Perform CPI (Cross-Program Invocation) to execute the instruction
-    invoke(
-        &update_ix,
-        &[
-            ctx.accounts.token_mint.to_account_info(),
-            ctx.accounts.token_program.to_account_info(),
-            ctx.accounts.authority.to_account_info(),
-        ],
-    )?;
-
-    msg!("Transfer hook registered successfully!");
-    Ok(())
-}
-
 fn get_token_balance(token_account: &AccountInfo) -> Result<u64> {
     // Use the spl_token::state::Account to access the token balance
     let data = spl_token::state::Account::unpack(&token_account.data.borrow()).map_err(|_| ErrorCode::TokenAccountCreationFailed)?;
     Ok(data.amount)
+}
+
+pub fn raydium_swap_instruction(
+    liquidity_pool: Pubkey,
+    source: Pubkey,
+    amount: u64,
+) -> Result<Instruction> {
+    let swap_ix = Instruction {
+        program_id: spl_token_2022::id(), // Raydium program address
+        accounts: vec![
+            AccountMeta::new_readonly(liquidity_pool, false), // Raydium liquidity pool
+            AccountMeta::new(source, false), // Source account (Project Wallet)
+        ],
+        data: amount.to_le_bytes().to_vec(), // Custom instruction data (Raydium swap specifics, e.g., amounts, slippage)
+    };
+    Ok(swap_ix)
 }

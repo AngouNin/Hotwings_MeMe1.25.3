@@ -25,6 +25,7 @@ pub struct GlobalState {
     pub exempted_wallets: Vec<Pubkey>,            // List of exempt wallets (dynamic size - limit required!)
     pub unlock_complete: bool,                    // Full unlock flag (1 byte) 
     pub raydium_program_id: Pubkey,               // Program ID of Raydium AMM (32 bytes)
+    pub liquidity_pool: Pubkey,                   // Raydium liquidity pool account (32 bytes)
 }
 
 
@@ -45,8 +46,8 @@ impl GlobalState {
         + 8                                             // three_month_unlock_date
         + 4 + (32 * MAX_EXEMPTED_WALLETS)         // Exempted_wallets (Vec metadata + max size)
         + 1                                            // unlock_complete flag
-        + 1
-        + 32;
+        + 32
+        + 32; 
 }
 
 #[derive(Accounts)]
@@ -219,6 +220,19 @@ pub struct UpdateRaydiumProgramId<'info> {
     pub global_state: Account<'info, GlobalState>, // Global state account
     ///CHECK: This is a standard wallet account, and the program will verify its usage
     pub authority: Signer<'info>, // Admin authority
+}
+
+#[derive(Accounts)]
+pub struct UpdateLiquidityPoolAddress<'info> {
+    #[account(
+        mut,
+        has_one = authority,
+        constraint = authority.key() == global_state.authority @ ErrorCode::Unauthorized
+    )]
+    pub global_state: Account<'info, GlobalState>, // Global state account
+
+    #[account(signer)]
+    pub authority: Signer<'info>, // Admin authority to approve the update
 }
 
  
