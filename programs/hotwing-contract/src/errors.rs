@@ -35,4 +35,6 @@ pub enum ErrorCode {
     SerializationFailed,
     #[msg("Invalid market cap value")]
     InvalidMarketCapValue, 
+    #[msg("Account Not Found")]
+    AccountNotFound,
 }
