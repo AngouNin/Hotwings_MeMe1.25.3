@@ -37,4 +37,6 @@ pub enum ErrorCode {
     InvalidMarketCapValue, 
     #[msg("Account Not Found")]
     AccountNotFound,
+    #[msg("Liquidity pool not set.")]
+    LiquidityPoolNotSet,
 }
