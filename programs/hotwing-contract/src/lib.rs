@@ -24,7 +24,7 @@ declare_id!("L1dCurNdHKSmpRHFKGcaNf64qzExvCMGuZbU3uun6ow");
 
 /// Program module
 #[program]
-pub mod hotwing_contract {
+pub mod hotwings {
     use anchor_spl::{associated_token::{get_associated_token_address, spl_associated_token_account}, token};
     use super::*;
 
