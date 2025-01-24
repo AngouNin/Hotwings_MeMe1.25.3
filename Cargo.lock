@@ -1086,7 +1086,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "hotwing-contract"
+name = "hotwings"
 version = "0.1.0"
 dependencies = [
  "anchor-lang",

@@ -1,5 +1,5 @@
 [package]
-name = "hotwing-contract"  # Replace this with your program name
+name = "hotwings"  # Replace this with your program name
 version = "0.1.0"
 edition = "2021"
 description = "Created with Anchor"
