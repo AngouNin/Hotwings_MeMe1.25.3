@@ -226,16 +226,26 @@ pub struct UpdateRaydiumProgramId<'info> {
 pub struct UpdateLiquidityPoolAddress<'info> {
     #[account(
         mut,
-        has_one = authority,
-        constraint = authority.key() == global_state.authority @ ErrorCode::Unauthorized
+        has_one = authority @ ErrorCode::Unauthorized, // Check that the provided authority matches
     )]
-    pub global_state: Account<'info, GlobalState>, // Global state account
-
+    pub global_state: Account<'info, GlobalState>, // Global State
     #[account(signer)]
-    pub authority: Signer<'info>, // Admin authority to approve the update
+    ///CHECK: The signer is the program's caller
+    pub authority: Signer<'info>, // Admin signer to approve such changes
 }
 
- 
+#[derive(Accounts)]
+pub struct UpdateAuthority<'info> {
+    #[account(
+        mut,
+        has_one = authority @ ErrorCode::Unauthorized // Verify relationship
+    )]
+    pub global_state: Account<'info, GlobalState>, // Global State
+    #[account(signer)]
+    ///CHECK: Signer ensures the caller is verified
+    pub authority: AccountInfo<'info>, // Current authority
+}
+
 pub struct RaydiumTransactionHelper;
 
 impl RaydiumTransactionHelper {

@@ -201,6 +201,12 @@ pub mod hotwing_contract {
 
     pub fn add_exempt_wallet(ctx: Context<ManageExemptWallet>, wallet: Pubkey) -> Result<()> {
         let global_state = &mut ctx.accounts.global_state;
+         // Ensure the caller is the global authority
+        require!(
+            ctx.accounts.authority.key() == global_state.authority,
+            ErrorCode::Unauthorized
+        );
+
 
         // Ensure that exempted wallets do not exceed the limit
         require!(
@@ -227,6 +233,12 @@ pub mod hotwing_contract {
 
     pub fn remove_exempt_wallet(ctx: Context<ManageExemptWallet>, wallet: Pubkey) -> Result<()> {
         let global_state = &mut ctx.accounts.global_state;
+
+        // Ensure the caller is the global authority
+        require!(
+            ctx.accounts.authority.key() == global_state.authority,
+            ErrorCode::Unauthorized
+        );
     
         // Remove wallet from the exempt list
         let original_count = global_state.exempted_wallets.len();
@@ -246,10 +258,13 @@ pub mod hotwing_contract {
         ctx: Context<'_, '_, '_, 'info, UnlockTokens<'info>>,
         market_cap: u64,
     ) -> Result<()> {
-        let global_state = &mut ctx.accounts.global_state;
-        // Validate the market cap
-        require!(market_cap > 0, ErrorCode::InvalidMarketCapValue);
-        require!(market_cap < 10_000_000, ErrorCode::InvalidMarketCapValue); // Arbitrary max for safety
+        let global_state = &mut ctx.accounts.global_state; 
+
+        // (1) Validate the market cap
+        require!(
+            market_cap > 0 && market_cap < 10_000_000, // Arbitrarily capped at 10M
+            ErrorCode::InvalidMarketCapValue
+        );
     
         // Update global market cap
         global_state.current_market_cap = market_cap;
@@ -344,9 +359,11 @@ pub mod hotwing_contract {
                 }
             }
         
-            if unlocked_tokens == 0 {
-                continue;
-            }
+            // Validate amount for transfer
+            require!(
+                unlocked_tokens > 0,
+                ErrorCode::ArithmeticOverflow
+            );
         
             // Apply the tax deduction (1.5%)
             let tax = unlocked_tokens
@@ -485,10 +502,17 @@ pub mod hotwing_contract {
         // Update the current market cap in the GlobalState account
         let global_state = &mut ctx.accounts.global_state;
     
-        // Validate authority (only the admin can update this)
-        if ctx.accounts.authority.key() != global_state.authority {
-            return Err(ErrorCode::Unauthorized.into());
-        }
+         // Validate that the caller is the correct authority
+        require!(
+            ctx.accounts.authority.key() == global_state.authority,
+            ErrorCode::Unauthorized
+        );
+
+        // (2) Validate market cap is within reasonable bounds
+        require!(
+            market_cap > 0 && market_cap <= 10_000_000, // Example: Cap at 10M for safety
+            ErrorCode::InvalidMarketCapValue
+        );
     
         // Update the market cap
         global_state.current_market_cap = market_cap;
@@ -599,6 +623,25 @@ pub mod hotwing_contract {
         Ok(())
     }
 
+    pub fn update_authority(ctx: Context<UpdateAuthority>, new_authority: Pubkey) -> Result<()> {
+        let global_state = &mut ctx.accounts.global_state;
+    
+        // Ensure the current authority is invoking this
+        require!(
+            ctx.accounts.authority.key() == global_state.authority,
+            ErrorCode::Unauthorized
+        );
+    
+        // Update the authority field in the global state
+        global_state.authority = new_authority;
+        msg!(
+            "The authority has been successfully updated to: {:?}",
+            new_authority
+        );
+    
+        Ok(())
+    }
+
 }
 
 // <<<<<<<<<<<<<<< PLACE THIS OUTSIDE THE #[program] BLOCK >>>>>>>>>>>>>>>
@@ -612,6 +655,9 @@ pub fn on_transfer<'a>(
     accounts: &'a [AccountInfo<'a>], // Account list: source, destination, global state, etc.
     amount: u64,                     // Number of tokens being transferred
 ) -> Result<()> {
+
+    // (1) Validate amount to avoid overflows or invalid values
+    require!(amount > 0, ErrorCode::ArithmeticOverflow);
 
     // Dynamically find critical accounts
     let source_account = find_account(accounts, |acc: &AccountInfo| {
@@ -663,12 +709,17 @@ pub fn on_transfer<'a>(
         ErrorCode::TokenTransferFailed
     );
 
-    
-
     msg!(
         "Transferring tokens: Source: {:?}, Destination: {:?}, Amount: {:?}",
         source_account.key, destination_account.key, amount
     );
+  
+
+    // Check if the source wallet is exempted (e.g., Project Wallet)
+    if global_state.exempted_wallets.contains(&source_account.key) {
+        msg!("Transfer from exempted account {:?}, skipping transfer hook", source_account.key);
+        return Ok(());
+    }
  
     // (3) Detect source program for AMM/Raydium transactions
     if RaydiumTransactionHelper::is_raydium_transaction(
