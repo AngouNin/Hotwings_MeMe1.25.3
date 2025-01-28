@@ -1,3 +1,5 @@
+#![allow(unexpected_cfgs)]
+
 use anchor_lang::prelude::*;
 use anchor_spl::associated_token::get_associated_token_address; 
 use spl_token::solana_program::program_pack::Pack;
