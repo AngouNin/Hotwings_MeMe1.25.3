@@ -10,7 +10,7 @@ resolution = true
 skip-lint = false
 
 [programs.devnet]
-hotwing_contract = "L1dCurNdHKSmpRHFKGcaNf64qzExvCMGuZbU3uun6ow"
+hotwings = "L1dCurNdHKSmpRHFKGcaNf64qzExvCMGuZbU3uun6ow"
 
 [registry]
 url = "https://api.apr.dev"
