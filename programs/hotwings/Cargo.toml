@@ -4,15 +4,15 @@ version = "0.1.0"
 edition = "2021"
 description = "Created with Anchor"
 
-[features] 
-no-entrypoint = [] 
+[features]  
 idl-build = [
     "anchor-lang/idl-build",
     "anchor-spl/idl-build",
 ]
-anchor-debug = [] 
+anchor-debug = []
 custom-heap = []
 custom-panic = []
+no-entrypoint = []
 no-idl = []
 no-log-ix-name = []
 
