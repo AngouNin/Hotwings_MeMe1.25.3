@@ -1,5 +1,6 @@
 use anchor_lang::prelude::*;
 use anchor_spl::associated_token::get_associated_token_address;
+use solana_program::program_pack::Pack as _;
 use spl_token::solana_program::program_pack::Pack;
 use solana_program::{
     account_info::AccountInfo,
@@ -25,7 +26,7 @@ declare_id!("L1dCurNdHKSmpRHFKGcaNf64qzExvCMGuZbU3uun6ow");
 /// Program module
 #[program]
 pub mod hotwings {
-    use anchor_spl::{associated_token::{get_associated_token_address, spl_associated_token_account}, token};
+    use anchor_spl::{associated_token::get_associated_token_address, token};
     use super::*;
 
     /// Initialize the program with milestones and setup global state
