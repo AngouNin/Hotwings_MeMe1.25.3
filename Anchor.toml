@@ -4,15 +4,18 @@
 resolution = true
 skip-lint = false
 
-[programs.localnet]
+[programs.devnet]
 hotwing_contract = "L1dCurNdHKSmpRHFKGcaNf64qzExvCMGuZbU3uun6ow"
 
 [registry]
 url = "https://api.apr.dev"
 
+[clusters]
+devnet = "https://api.devnet.solana.com"
+
 [provider]
-cluster = "Localnet"
-wallet = "~/.config/solana/id.json"
+cluster = "Devnet"
+wallet = "~/.config/solana/hotRUj9Bso8Et2hUmnzBndWvwAVJ1s8fLnSaAGQHNg5.json"
 
 [scripts]
 test = "yarn run ts-mocha -p ./tsconfig.json -t 1000000 tests/**/*.ts"
