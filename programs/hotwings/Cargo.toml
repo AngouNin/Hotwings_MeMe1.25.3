@@ -23,9 +23,14 @@ name = "hotwings"  # Replace this with your program name
 [dependencies]
 anchor-lang = { version = "=0.29.0", features = ["init-if-needed"] }
 anchor-spl = "0.29.0"
-spl-token = { version = "=4.0.3", default-features = false, features = ["no-entrypoint"] }
+spl-token = { version = "=4.0.0", default-features = false, features = ["no-entrypoint"] }
 solana-program = "1.18.26"   
-solana-zk-token-sdk = "1.18.11"   
+solana-zk-token-sdk = "=1.18.26"   
 spl-token-2022 = { version = "3.0.4", default-features = false }
 spl-associated-token-account = { version = "3.0.4", features = ["no-entrypoint"] }
-borsh = "=0.9.3"
+borsh = "=0.9.3" 
+
+[dev-dependencies]
+solana-program-test = "1.18.26"
+solana-sdk = "1.16"
+anchor-lang = "0.29.0"  
