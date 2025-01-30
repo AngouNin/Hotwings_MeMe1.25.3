@@ -203,6 +203,10 @@ pub mod hotwings {
 
     pub fn add_exempt_wallet(ctx: Context<ManageExemptWallet>, wallet: Pubkey) -> Result<()> {
         let global_state = &mut ctx.accounts.global_state;
+
+        // Ensure authority is a signer
+        require!(ctx.accounts.authority.is_signer, ErrorCode::Unauthorized);
+
          // Ensure the caller is the global authority
         require!(
             ctx.accounts.authority.key() == global_state.authority,
@@ -235,6 +239,9 @@ pub mod hotwings {
 
     pub fn remove_exempt_wallet(ctx: Context<ManageExemptWallet>, wallet: Pubkey) -> Result<()> {
         let global_state = &mut ctx.accounts.global_state;
+
+        // Ensure authority is a signer
+        require!(ctx.accounts.authority.is_signer, ErrorCode::Unauthorized);
 
         // Ensure the caller is the global authority
         require!(
@@ -290,7 +297,7 @@ pub mod hotwings {
         // Ensure milestone exists and is valid
         require!(
             milestone_idx < global_state.milestones.len(),
-            ErrorCode::MiletoneNotReached
+            ErrorCode::MiletoneCompleted
         );
 
         while milestone_idx < MAX_MILESTONES
@@ -503,6 +510,9 @@ pub mod hotwings {
     pub fn update_market_cap(ctx: Context<UpdateMarketCap>, market_cap: u64) -> Result<()> {
         // Update the current market cap in the GlobalState account
         let global_state = &mut ctx.accounts.global_state;
+
+        // Ensure authority is a signer
+        require!(ctx.accounts.authority.is_signer, ErrorCode::Unauthorized);
     
          // Validate that the caller is the correct authority
         require!(
@@ -537,6 +547,9 @@ pub mod hotwings {
 
     pub fn update_raydium_program_id(ctx: Context<UpdateRaydiumProgramId>, new_raydium_program_id: Pubkey) -> Result<()> {
         let global_state = &mut ctx.accounts.global_state;
+
+        // Ensure authority is a signer
+        require!(ctx.accounts.authority.is_signer, ErrorCode::Unauthorized);
     
         // Ensure only the authority can execute this instruction
         if ctx.accounts.authority.key() != global_state.authority {
@@ -557,6 +570,9 @@ pub mod hotwings {
         new_liquidity_pool: Pubkey,
     ) -> Result<()> {
         let global_state = &mut ctx.accounts.global_state;
+
+        // Ensure authority is a signer
+        require!(ctx.accounts.authority.is_signer, ErrorCode::Unauthorized);
 
         // Ensure only the authority can execute this instruction
         if ctx.accounts.authority.key() != global_state.authority {
