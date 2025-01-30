@@ -39,4 +39,6 @@ pub enum ErrorCode {
     AccountNotFound,
     #[msg("Liquidity pool not set.")]
     LiquidityPoolNotSet,
+    #[msg("Mileston has finished.")]
+    MiletoneCompleted,
 }

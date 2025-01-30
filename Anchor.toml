@@ -9,17 +9,18 @@ upgradeable = true
 resolution = true
 skip-lint = false
 
-[programs.devnet]
+[programs.localnet]
 hotwings = "L1dCurNdHKSmpRHFKGcaNf64qzExvCMGuZbU3uun6ow"
 
 [registry]
 url = "https://api.apr.dev"
 
 [clusters]
+localnet = "http://127.0.0.1:8899"
 devnet = "https://api.devnet.solana.com"
 
 [provider]
-cluster = "devnet"
+cluster = "localnet"
 wallet = "~/.config/solana/hotRUj9Bso8Et2hUmnzBndWvwAVJ1s8fLnSaAGQHNg5.json"
 
 [scripts]
